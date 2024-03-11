@@ -1,0 +1,35 @@
+# 创建一个新的conda环境（可选）
+conda create -n robot_env python=3.8
+
+# 激活您的conda环境
+conda activate robot_env
+
+# 安装PyTorch和torchvision（请根据您的CUDA版本选择合适的安装命令）
+# 例如，对于没有CUDA支持的环境：
+conda install pytorch torchvision -c pytorch
+
+# 安装PyAudio
+conda install -c conda-forge pyaudio
+
+# 安装OpenCV
+conda install -c conda-forge opencv
+
+# 安装NumPy
+conda install numpy
+
+# 安装SpeechRecognition
+# 注意：SpeechRecognition可能不在conda的默认仓库中，您可能需要使用pip来安装
+pip install SpeechRecognition
+
+# 安装gTTS
+pip install gTTS
+
+# 安装Gym
+conda install -c conda-forge gym
+
+# 如果需要使用特定版本的Gym，或者需要安装额外的环境，可以使用以下命令
+# 注意：这可能需要使用pip，因为某些Gym环境可能不在conda的默认仓库中
+pip install 'gym[box2d,robotics]'
+
+# 安装其他可能需要的库
+conda install matplotlib scipy pandas
