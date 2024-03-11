@@ -1,0 +1,2 @@
+# myai
+ai in all
