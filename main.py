@@ -37,15 +37,22 @@ class ReplayBuffer:
         self.buffer = []
         self.capacity = capacity
 
-    def push(self, state, action, reward, next_state, done):
+    def push(self, state, action, reward, next_state,audio_state,next_audio_state, done):
         if len(self.buffer) >= self.capacity:
             self.buffer.pop(0)
-        self.buffer.append((state, action, reward, next_state, done))
+        self.buffer.append((state, action, reward, next_state,audio_state,next_audio_state, done))
 
     def sample(self, batch_size):
         experiences = random.sample(self.buffer, batch_size)
-        states, actions, rewards, next_states, dones = zip(*experiences)
-        return states, actions, rewards, next_states, dones
+        states = [exp[0] for exp in experiences]
+        actions = [exp[1] for exp in experiences]
+        rewards = [exp[2] for exp in experiences]
+        next_states = [exp[3] for exp in experiences]
+        audio_states= [exp[4] for exp in experiences]
+        next_audio_states = [exp[5] for exp in experiences]
+        dones = [exp[6] for exp in experiences]
+        #states, actions, rewards, next_states, dones = zip(*experiences)
+        return states, actions, rewards, next_states, audio_states,next_audio_states,dones
 
     def __len__(self):
         return len(self.buffer)
@@ -105,6 +112,7 @@ class RobotEnv(gym.Env):
         self.memory = (torch.zeros(1, 128), torch.zeros(1, 128))  #
         # 初始化环境状态
         self.state = None
+        self.audio_state=None
         self.action_space = gym.spaces.Discrete(10)  # 假设有10种可能的动作
         self.observation_space = gym.spaces.Box(low=0, high=255, shape=(224, 224, 3), dtype=float)  # 假设视频数据
 
@@ -123,17 +131,11 @@ class RobotEnv(gym.Env):
 
     def reset(self):
         # 重置环境状态
-        self.state = self.get_initial_state()
-        return self.state
+        self.state,self.audio_state = self.get_initial_state()
+        return self.state,self.audio_state
 
     def get_initial_state(self):
-        # 获取初始状态,例如从摄像头获取一帧图像
-        ret, frame = cap.read()
-        if not ret:
-            raise ValueError("无法从摄像头读取数据")
-        else:
-            frame = process_video(frame)
-        return frame
+        return get_Video(),get_audio()
 
     def step(self, action):
         # 执行动作并返回新状态、奖励、完成标志和额外信息
@@ -141,41 +143,6 @@ class RobotEnv(gym.Env):
         # 在执行动作之前，确保 memory 已经被初始化
         if self.memory[0] is None:
             self.memory = (torch.zeros(1, 128), torch.zeros(1, 128))
-        audio_stream = pyaudio.PyAudio().open(
-            format=pyaudio.paInt16,
-            channels=1,
-            rate=44100,
-            input=True,
-            frames_per_buffer=1024  # 保持原来的设置
-        )
-        # 尝试读取音频数据，添加异常处理
-        try:
-            audio_data = audio_stream.read(1024)  # 确保audio_stream是一个已经打开的音频流
-        except OSError as e:
-            if e.errno == -9981:
-                print("音频输入溢出，重置音频流...")
-                # 关闭当前音频流
-                # 创建新的音频流
-                audio_stream = pyaudio.PyAudio().open(
-                    format=pyaudio.paInt16,
-                    channels=1,
-                    rate=44100,
-                    input=True,
-                    frames_per_buffer=1024  # 保持原来的设置
-                )
-                # 重新尝试读取音频数据
-                audio_data = audio_stream.read(1024)
-            else:
-                raise  # 抛出其他类型的异常
-        # 检查读取的音频数据长度
-        if len(audio_data) < 1024:
-            # 如果读取的数据不足1024字节，填充剩余的部分
-            audio_data += b'\x00' * (1024 - len(audio_data))
-        # 检查读取的音频数据长度
-        if len(audio_data) > 1024:
-            # 如果读取的数据超过1024字节，截断或分帧处理
-            # 这里我们选择截断数据
-            audio_data = audio_data[:1024]
 
         # 选择动作
         if epsilon is not None and random.random() < epsilon:
@@ -184,12 +151,13 @@ class RobotEnv(gym.Env):
         else:
             # 使用模型执行动作并获取动作概率和记忆状态
 
-            action_probs, memory = model(state, audio_data, self.memory)
+            action_probs, memory = model(state, audio_state, self.memory)
             # 更新 self.memory 以供下一次调用 step 方法时使用
             self.memory = memory
             action = torch.argmax(action_probs).item()
 
-            next_state = self.get_initial_state()
+            next_state,next_audio_state = self.get_initial_state()
+
             done = False  # 假设环境不会结束
             info = {
                 'some_key': 'some_value',
@@ -199,9 +167,9 @@ class RobotEnv(gym.Env):
             # 额外信息
 
             # 使用识别出的奖励信号,如果没有提供,则使用默认值
-            reward = identify_reward(audio_data)
+            reward = identify_reward(audio_state)
 
-            return next_state, reward, done, info
+            return next_state, next_audio_state,reward, done, info
 
 
 class ComplexMultiModalNN(nn.Module):
@@ -248,24 +216,14 @@ class ComplexMultiModalNN(nn.Module):
         )
 
     def forward(self, visual_input, audio_input, memory=None):
-        # 视觉特征提取
-        # 假设 visual_input 是一个 NumPy 数组
-        # 首先，将其转换为 PyTorch 张量
-        if isinstance(visual_input, torch.Tensor):
-            print("visual_input is a PyTorch tensor.")
-            # 如果您的环境配置了 GPU，并且您希望在 GPU 上进行计算
-            # 确保 visual_input_tensor 是一个浮点类型的张量
-            # 然后将其移动到 GPU 上
-            if torch.cuda.is_available():
-                visual_input = visual_input.cuda()
-        else:
-            visual_input = torch.from_numpy(visual_input).float()
-        # 在传递给卷积层之前添加批次维度
-        # 确保 visual_input 是一个4维张量
-        if visual_input.dim() != 4:
-            print("视觉输入的维度不正确，正在调整...")
-            visual_input = visual_input.unsqueeze(0)  # 添加批次维度
 
+        if torch.cuda.is_available():
+            visual_input = visual_input.cuda()
+            audio_input = audio_input.cuda()
+
+
+
+        # 视觉特征提取
         visual_input = F.relu(self.conv1(visual_input))
         visual_input = F.max_pool2d(visual_input, 2)
         visual_input = F.relu(self.conv2(visual_input))
@@ -284,8 +242,7 @@ class ComplexMultiModalNN(nn.Module):
         visual_features = self.visual_fc(visual_input_flattened)
 
         # 听觉特征提取
-
-        audio_features = F.relu(self.audio_conv1(process_audio(audio_input)))
+        audio_features = F.relu(self.audio_conv1(audio_input))
         audio_features = F.relu(self.audio_conv2(audio_features))
         print("Audio features shape before flattening:", audio_features.size())
         # 此处应包含展平操作，假设音频特征在展平前的最后一维为1024
@@ -298,7 +255,7 @@ class ComplexMultiModalNN(nn.Module):
         audio_features_processed = audio_features_processed.unsqueeze(1)
         # 自注意力
         visual_features = self.self_attention(visual_features, visual_features, visual_features, None)
-
+        audio_features_processed= self.self_attention(audio_features_processed, audio_features_processed, audio_features_processed, None)
         # 合并视觉和听觉特征
         combined_features = torch.cat((visual_features, audio_features_processed), dim=1)
         print("Combined features shape:", combined_features.size())
@@ -329,13 +286,6 @@ class ComplexMultiModalNN(nn.Module):
         action_probs = self.action_net(combined_input)
         print("Action probabilities shape:", action_probs.size())
         return action_probs, memory
-
-
-vocab = string.ascii_letters + string.digits + ' '
-
-
-def decode_index_to_text(index):
-    return ''.join([vocab[i] for i in index])
 
 
 def compute_reward(self, next_state):
@@ -370,14 +320,15 @@ def check_done(self, next_state):
     return False
 
 
-def identify_reward(audio_data):
-    audio_data = sr.AudioData(audio_data, 44100, sample_width=2)
+def identify_reward(Rewardaudio_data):
+    Rewardaudio_data = sr.AudioData(Rewardaudio_data, 44100, sample_width=2)
     # 初始化语音识别器
     recognizer = sr.Recognizer()
 
     # 使用语音识别API将音频数据转换为文本
     try:
-        text = recognizer.recognize_google(audio_data, language='en-US')
+        #text = recognizer.recognize_google(Rewardaudio_data, language='en-US')
+        text="well done"
         print("Recognized speech: ", text)
     except sr.UnknownValueError:
         print("Google Speech Recognition could not understand audio")
@@ -423,8 +374,57 @@ def process_video(video_frame):
     video_frame = np.transpose(video_frame, (2, 0, 1))
 
     return video_frame
+def get_Video():
+    ret, frame = cap.read()  # 确保cap是一个已经打开的视频流
+    if not ret:
+        raise ValueError("无法从摄像头读取数据")
 
-
+    # 预处理视频和音频数据
+    processed_video = process_video(frame)
+    # 确保视频数据的形状是 [1, channels, height, width]
+    video_data= torch.tensor(processed_video).unsqueeze(0).float()
+    return video_data
+def get_audio():
+    # 尝试读取音频数据，添加异常处理
+    try:
+        audio_stream = pyaudio.PyAudio().open(
+            format=pyaudio.paInt16,
+            channels=1,
+            rate=44100,
+            input=True,
+            frames_per_buffer=1024  # 保持原来的设置
+        )
+        audio_data = audio_stream.read(1024)  # 确保audio_stream是一个已经打开的音频流
+        audio_stream.stop_stream()
+        audio_stream.close()  # 终止PyAudio实例
+    except OSError as e:
+        if e.errno == -9981:
+            print("音频输入溢出，重置音频流...")
+            # 关闭当前音频流
+            # 创建新的音频流
+            audio_stream = pyaudio.PyAudio().open(
+                format=pyaudio.paInt16,
+                channels=1,
+                rate=44100,
+                input=True,
+                frames_per_buffer=1024  # 保持原来的设置
+            )
+            # 重新尝试读取音频数据
+            audio_data = audio_stream.read(1024)
+        else:
+            raise  # 抛出其他类型的异常
+    # 检查读取的音频数据长度
+    if len(audio_data) < 1024:
+        # 如果读取的数据不足1024字节，填充剩余的部分
+        audio_data += b'\x00' * (1024 - len(audio_data))
+    # 检查读取的音频数据长度
+    if len(audio_data) > 1024:
+        # 如果读取的数据超过1024字节，截断或分帧处理
+        # 这里我们选择截断数据
+        audio_data = audio_data[:1024]
+    audio_data=process_audio(audio_data)
+    audio_data=audio_data.clone().detach().float()
+    return audio_data
 # 初始化摄像头和麦克风
 cap = cv2.VideoCapture(0)
 
@@ -443,102 +443,121 @@ memory = (torch.zeros(1, 128), torch.zeros(1, 128))  # LSTM的隐藏状态和细
 epsilon = 0.1  # 例如，设置为0.1
 # 训练循环
 
-num_episodes = 1000  # 设置一个较大的episode数,以便模型可以持续学习
+num_episodes = 20  # 设置一个较大的episode数,以便模型可以持续学习
 for episode in range(num_episodes):
     # 重置环境和记忆
     replay_buffer = ReplayBuffer(capacity=10000)
-    state = env.reset()
+    state,audio_state = env.reset()
 
     total_reward = 0
     print("开始循环训练：", episode)
     # 执行动作并收集经验
-    for t in range(1000):  # 假设每个episode有1000个时间步
+    total_timestip=10
+    buffer_count=0
+    for t in range(total_timestip):  # 假设每个episode有1000个时间步
 
         print("时间步：", t)
-        ret, frame = cap.read()  # 确保cap是一个已经打开的视频流
-        if not ret:
-            raise ValueError("无法从摄像头读取数据")
-
-        # 尝试读取音频数据，添加异常处理
-        try:
-            audio_stream = pyaudio.PyAudio().open(
-                format=pyaudio.paInt16,
-                channels=1,
-                rate=44100,
-                input=True,
-                frames_per_buffer=1024  # 保持原来的设置
-            )
-            audio_data = audio_stream.read(1024)  # 确保audio_stream是一个已经打开的音频流
-            audio_stream.stop_stream()
-            audio_stream.close()  # 终止PyAudio实例
-        except OSError as e:
-            if e.errno == -9981:
-                print("音频输入溢出，重置音频流...")
-                # 关闭当前音频流
-                # 创建新的音频流
-                audio_stream = pyaudio.PyAudio().open(
-                    format=pyaudio.paInt16,
-                    channels=1,
-                    rate=44100,
-                    input=True,
-                    frames_per_buffer=1024  # 保持原来的设置
-                )
-                # 重新尝试读取音频数据
-                audio_data = audio_stream.read(1024)
-            else:
-                raise  # 抛出其他类型的异常
-        # 检查读取的音频数据长度
-        if len(audio_data) < 1024:
-            # 如果读取的数据不足1024字节，填充剩余的部分
-            audio_data += b'\x00' * (1024 - len(audio_data))
-        # 检查读取的音频数据长度
-        if len(audio_data) > 1024:
-            # 如果读取的数据超过1024字节，截断或分帧处理
-            # 这里我们选择截断数据
-            audio_data = audio_data[:1024]
-
-        processed_audio = process_audio(audio_data)
-        # 预处理视频和音频数据
-        processed_video = process_video(frame)
-
         # 选择动作
         model.eval()
         with torch.no_grad():
-            # 确保视频数据的形状是 [1, channels, height, width]
-            video_tensor = torch.tensor(processed_video).unsqueeze(0).float()
-            audio_tensor = processed_audio.clone().detach().float()
+
+            video_tensor =get_Video()
+            audio_tensor = get_audio()
             action_probs, memory = model(video_tensor, audio_tensor, memory)
         action = torch.argmax(action_probs).item()
 
-        # 执行动作并观察结果
-        next_state, reward, done, info = env.step(action)
-        replay_buffer.push(state, action, reward, next_state, done)
-        state = next_state
-        total_reward += reward
+        result = env.step(action)
+        if result is not None:
+            next_state, next_audio_state,reward, done, info = result
+
+            replay_buffer.push(state, action, reward, next_state, audio_state,next_audio_state,done)
+            state = next_state
+            audio_state=next_audio_state
+            total_reward += reward
+            buffer_count=buffer_count+1
+        else:
+            # 处理返回值为None的情况
+            print("env.step returned None, which is not iterable.")
+
 
         # 如果是最后一个时间步，播放询问音频
-        if t == 3:
-            question_audio = env.text_to_speech("我干得好吗？")
-            env.play_audio(question_audio)
+        if t == total_timestip-1:
+            print("我干得好吗？此处已经注释")
+            #question_audio = env.text_to_speech("我干得好吗？")
+            #env.play_audio(question_audio)
 
         # 如果episode结束，跳出循环
-        if done:
-            break
+        #if done:
+            #break
 
     # 训练模型
     print("实施训练")
     model.train()
-    for _ in range(10):  # 假设每个episode训练10次
-        experience = replay_buffer.sample(batch_size=32)
-        states, actions, rewards, next_states, dones = zip(*experience)
+    for _ in range(buffer_count):  # 每个episode训练buffer_count次
+
+        states, actions, rewards, next_states, audio_states,next_audio_states,dones = replay_buffer.sample(batch_size=6)
+        # 确保 dones 是一个一维的布尔张量
+        dones = torch.tensor(dones).float()
 
         # 计算目标 Q 值
-        target_q_values = rewards + (1 - dones) * 0.99 * torch.max(model(next_states), dim=1).values
+
+        # 假设 rewards, next_states, next_audio_states, 和 dones 都是列表
+        # 首先，初始化一个空列表来存储每个样本的目标 Q 值
+        target_q_values_list = []
+
+        # 遍历每个样本
+        for i in range(len(rewards)):
+            # 计算当前样本的目标 Q 值
+            current_reward = rewards[i]
+            current_next_state = next_states[i]
+            current_next_audio_state = next_audio_states[i]
+            current_done = dones[i]
+
+            # 计算 max Q 值，如果模型接受单个样本作为输入
+            # 假设 model 返回的是一个名为 action_probs 的张量
+            action_probs, _ = model(current_next_state, current_next_audio_state, memory)
+            # 使用 torch.max 获取最大值
+            max_q_value = torch.max(action_probs, dim=1)[0]  # 获取最大值
+
+            # 计算当前样本的目标 Q 值
+            target_q_value = current_reward + (1 - current_done) * 0.99 * max_q_value
+
+            # 将计算出的目标 Q 值添加到列表中
+            target_q_values_list.append(target_q_value)
+
+        # 将列表转换为张量
+        target_q_values = torch.stack(target_q_values_list)
         print("Target Q values shape:", target_q_values.size())
         print("Target Q values:", target_q_values)
 
         # 计算当前 Q 值
-        current_q_values = model(states).gather(1, actions.unsqueeze(1)).squeeze(1)
+        # 初始化 app_q_values 为一个空张量，形状为 [0, 10]
+        app_q_values = torch.empty(0, 10)
+
+        # 在循环中累积 Q 值张量
+        for state, audio_state, action in zip(states, audio_states, actions):
+            q_values, _ = model(state, audio_state, memory)
+
+            # 选择第一个状态的所有动作的 Q 值，形状为 [10]
+            current_q_values = q_values[0]  # 选择第一个状态的 Q 值
+
+            # 如果是第一次迭代，初始化 app_q_values 为 current_q_values 的副本
+            if app_q_values.nelement() == 0:
+                app_q_values = current_q_values.unsqueeze(0)  # 添加批次维度
+            else:
+                # 否则，将 current_q_values 添加到 app_q_values 的下一个批次
+                current_q_values = current_q_values.unsqueeze(0)  # 添加批次维度
+                app_q_values = torch.cat((app_q_values, current_q_values), dim=0)
+
+        # 现在 app_q_values 是一个包含所有时间步的 Q 值的张量，形状为 [T, 10]
+        # 确保 actions_tensor 的形状是 [T, 1]
+        actions_tensor = torch.tensor(actions).view(-1, 1)  # 确保 actions_tensor 是 2D 张量
+
+        # 使用 gather 函数来提取特定动作的 Q 值
+        current_q_values = app_q_values.gather(dim=1, index=actions_tensor).squeeze()
+        # 打印 Q 值列表
+        print("Current Q values:", current_q_values)
+
         print("Current Q values shape:", current_q_values.size())
         print("Current Q values:", current_q_values)
         loss = F.mse_loss(current_q_values, target_q_values)
@@ -554,18 +573,10 @@ for episode in range(num_episodes):
     torch.save(model.state_dict(), 'robot_model.pt')
 # 在所有episode完成后，执行资源释放
 cap.release()  # 释放摄像头资源
-audio_stream.stop_stream()  # 停止音频流
-audio_stream.close()  # 关闭音频流
-if audio_stream.is_active():
-    audio_stream.stop_stream()
-audio_stream.terminate()  # 终止PyAudio实例
+
 if __name__ == '__main__':
     # ...省略初始化代码...
     # ...省略训练循环...
     # 在程序的最后，执行资源释放
     cap.release()
-    audio_stream.stop_stream()
-    audio_stream.close()
-    if audio_stream.is_active():
-        audio_stream.stop_stream()
-    audio_stream.close()
+
