@@ -44,13 +44,17 @@ class ReplayBuffer:
 
     def sample(self, batch_size):
         experiences = random.sample(self.buffer, batch_size)
-        states = [exp[0] for exp in experiences]
-        actions = [exp[1] for exp in experiences]
-        rewards = [exp[2] for exp in experiences]
-        next_states = [exp[3] for exp in experiences]
-        audio_states= [exp[4] for exp in experiences]
-        next_audio_states = [exp[5] for exp in experiences]
-        dones = [exp[6] for exp in experiences]
+        states = torch.cat([exp[0] for exp in experiences],dim=0)
+        actions_int=[exp[1]  for exp in experiences]
+        actions = torch.tensor([(1,action) for action in actions_int], dtype=torch.int)
+        rewards_float=[exp[2]  for exp in experiences]
+        rewards = torch.tensor([(1,reward) for reward in rewards_float], dtype=torch.float)
+        next_states = torch.cat([exp[3] for exp in experiences],dim=0)
+        audio_states= torch.cat([exp[4] for exp in experiences],dim=0)
+        next_audio_states = torch.cat([exp[5] for exp in experiences],dim=0)
+        dones_int=[ int(exp[6]) for exp in experiences]
+        dones = torch.tensor([(1,done) for done in dones_int], dtype=torch.float)
+
         #states, actions, rewards, next_states, dones = zip(*experiences)
         return states, actions, rewards, next_states, audio_states,next_audio_states,dones
 
@@ -224,6 +228,7 @@ class ComplexMultiModalNN(nn.Module):
 
 
         # 视觉特征提取
+        print(" visual_input shape:", visual_input.size())
         visual_input = F.relu(self.conv1(visual_input))
         visual_input = F.max_pool2d(visual_input, 2)
         visual_input = F.relu(self.conv2(visual_input))
@@ -497,10 +502,10 @@ for episode in range(num_episodes):
 
         states, actions, rewards, next_states, audio_states,next_audio_states,dones = replay_buffer.sample(batch_size=6)
         # 确保 dones 是一个一维的布尔张量
-        dones = torch.tensor(dones).float()
+
 
         # 计算目标 Q 值
-
+        target_q_values = rewards + (1 - dones) * 0.99 * torch.max(model(next_states,next_audio_states,memory), dim=1).values
         # 假设 rewards, next_states, next_audio_states, 和 dones 都是列表
         # 首先，初始化一个空列表来存储每个样本的目标 Q 值
         target_q_values_list = []
@@ -508,19 +513,19 @@ for episode in range(num_episodes):
         # 遍历每个样本
         for i in range(len(rewards)):
             # 计算当前样本的目标 Q 值
-            current_reward = rewards[i]
-            current_next_state = next_states[i]
-            current_next_audio_state = next_audio_states[i]
-            current_done = dones[i]
+            reward = rewards[i]
+            next_state = next_states[i]
+            next_audio_state = next_audio_states[i]
+            done = dones[i]
 
             # 计算 max Q 值，如果模型接受单个样本作为输入
             # 假设 model 返回的是一个名为 action_probs 的张量
-            action_probs, _ = model(current_next_state, current_next_audio_state, memory)
+            action_probs, _ = model(next_state, next_audio_state, memory)
             # 使用 torch.max 获取最大值
             max_q_value = torch.max(action_probs, dim=1)[0]  # 获取最大值
 
             # 计算当前样本的目标 Q 值
-            target_q_value = current_reward + (1 - current_done) * 0.99 * max_q_value
+            target_q_value = reward + (1 - done) * 0.99 * max_q_value
 
             # 将计算出的目标 Q 值添加到列表中
             target_q_values_list.append(target_q_value)
@@ -530,31 +535,14 @@ for episode in range(num_episodes):
         print("Target Q values shape:", target_q_values.size())
         print("Target Q values:", target_q_values)
 
+
+
+        newact=actions.unsqueeze(1)
+
+
         # 计算当前 Q 值
-        # 初始化 app_q_values 为一个空张量，形状为 [0, 10]
-        app_q_values = torch.empty(0, 10)
+        current_q_values = model(torch.cat(states,dim=0), torch.cat(audio_states,dim=0), torch.cat(memory,dim=0)).gather(1, actions.unsqueeze(1)).squeeze(1)
 
-        # 在循环中累积 Q 值张量
-        for state, audio_state, action in zip(states, audio_states, actions):
-            q_values, _ = model(state, audio_state, memory)
-
-            # 选择第一个状态的所有动作的 Q 值，形状为 [10]
-            current_q_values = q_values[0]  # 选择第一个状态的 Q 值
-
-            # 如果是第一次迭代，初始化 app_q_values 为 current_q_values 的副本
-            if app_q_values.nelement() == 0:
-                app_q_values = current_q_values.unsqueeze(0)  # 添加批次维度
-            else:
-                # 否则，将 current_q_values 添加到 app_q_values 的下一个批次
-                current_q_values = current_q_values.unsqueeze(0)  # 添加批次维度
-                app_q_values = torch.cat((app_q_values, current_q_values), dim=0)
-
-        # 现在 app_q_values 是一个包含所有时间步的 Q 值的张量，形状为 [T, 10]
-        # 确保 actions_tensor 的形状是 [T, 1]
-        actions_tensor = torch.tensor(actions).view(-1, 1)  # 确保 actions_tensor 是 2D 张量
-
-        # 使用 gather 函数来提取特定动作的 Q 值
-        current_q_values = app_q_values.gather(dim=1, index=actions_tensor).squeeze()
         # 打印 Q 值列表
         print("Current Q values:", current_q_values)
 
