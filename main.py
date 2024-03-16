@@ -46,7 +46,7 @@ class ReplayBuffer:
         experiences = random.sample(self.buffer, batch_size)
         states = torch.cat([exp[0] for exp in experiences],dim=0)
         actions_int=[exp[1]  for exp in experiences]
-        actions = torch.tensor([(1,action) for action in actions_int], dtype=torch.int)
+        actions = torch.tensor([(1,action) for action in actions_int], dtype=torch.int64)
         rewards_float=[exp[2]  for exp in experiences]
         rewards = torch.tensor([(1,reward) for reward in rewards_float], dtype=torch.float)
         next_states = torch.cat([exp[3] for exp in experiences],dim=0)
@@ -113,7 +113,7 @@ class RobotEnv(gym.Env):
             frames_per_buffer=1024
         )
         # 初始化记忆状态
-        self.memory = (torch.zeros(1, 128), torch.zeros(1, 128))  #
+        self.memory =None
         # 初始化环境状态
         self.state = None
         self.audio_state=None
@@ -144,9 +144,6 @@ class RobotEnv(gym.Env):
     def step(self, action):
         # 执行动作并返回新状态、奖励、完成标志和额外信息
         # ... 执行动作的代码 ..
-        # 在执行动作之前，确保 memory 已经被初始化
-        if self.memory[0] is None:
-            self.memory = (torch.zeros(1, 128), torch.zeros(1, 128))
 
         # 选择动作
         if epsilon is not None and random.random() < epsilon:
@@ -182,10 +179,10 @@ class ComplexMultiModalNN(nn.Module):
         super(ComplexMultiModalNN, self).__init__()
 
         # 初始化LSTM层
-        self.memory_cell = nn.LSTMCell(128, 128)  # 假设输入和隐藏状态的维度都是128
+        self.memory_cell = nn.LSTMCell(256, 256)  # 假设输入和隐藏状态的维度都是256
 
         # 初始化记忆更新决策层
-        self.update_memory_decision = nn.Linear(128, 1)
+        self.update_memory_decision = nn.Linear(256, 1)
 
         # 视觉处理部分
         # 添加视频卷积层
@@ -199,25 +196,25 @@ class ComplexMultiModalNN(nn.Module):
 
         # 定义线性层，使用实际的特征数量
         self.visual_fc = nn.Linear(num_features, 128)
-        self.audio_fc = nn.Linear(65536, 128)  # 假设你需要将音频特征从1024维降到128维
+        # 听觉处理部分
+
         # 添加音频卷积层
         self.audio_conv1 = nn.Conv1d(1, 32, kernel_size=3, stride=1, padding=1)
         self.audio_conv2 = nn.Conv1d(32, 64, kernel_size=3, stride=1, padding=1)
-        # 添加音频生成模块
-        self.audio_generator = AudioGenerator(input_size=128, audio_sample_rate=44100, audio_length=16000)
+        # 全连接层
+        self.audio_fc = nn.Linear(65536, 128)  # 假设你需要将音频特征从1024维降到128维
 
-        # 听觉处理部分
-        self.fc_audio = nn.Linear(64, 128)
 
         # 自注意力层
         self.self_attention = SelfAttention(embed_size=128, heads=4)
 
         # 动作生成部分
         self.action_net = nn.Sequential(
-            nn.Linear(128 + 128, 256),
+            nn.Linear(512, 512),
             nn.ReLU(),
-            nn.Linear(256, 10)  # 假设有10种可能的动作
+            nn.Linear(512, 10)  # 假设有10种可能的动作
         )
+
 
     def forward(self, visual_input, audio_input, memory=None):
 
@@ -228,33 +225,32 @@ class ComplexMultiModalNN(nn.Module):
 
 
         # 视觉特征提取
-        print(" visual_input shape:", visual_input.size())
+        # print(" visual_input shape:", visual_input.size())
         visual_input = F.relu(self.conv1(visual_input))
         visual_input = F.max_pool2d(visual_input, 2)
         visual_input = F.relu(self.conv2(visual_input))
         visual_input = F.max_pool2d(visual_input, 2)
         # 在forward方法中，卷积层之后添加打印语句
-        print("Convolutional visual_input shape:", visual_input.size())
+        # print("Convolutional visual_input shape:", visual_input.size())
         # 计算卷积层输出的特征图的展平大小
         batch_size = visual_input.size(0)
-        print("batch_size:", batch_size)
+        # print("batch_size:", batch_size)
         num_features = visual_input.size(1) * visual_input.size(2) * visual_input.size(3)
-        print("num_features:", num_features)
+        # print("num_features:", num_features)
         # 展平特征图
         visual_input_flattened = visual_input.view(batch_size, -1)  # 展平为 [batch_size, num_features]
-        print("visual_input_flattened:", visual_input_flattened)
+        # print("visual_input_flattened:", visual_input_flattened)
         # 全连接层处理展平后的特征图
         visual_features = self.visual_fc(visual_input_flattened)
 
         # 听觉特征提取
         audio_features = F.relu(self.audio_conv1(audio_input))
         audio_features = F.relu(self.audio_conv2(audio_features))
-        print("Audio features shape before flattening:", audio_features.size())
+        # print("Audio features shape before flattening:", audio_features.size())
         # 此处应包含展平操作，假设音频特征在展平前的最后一维为1024
         # 展平音频特征，确保批次大小为1在最前面
-        audio_features_flattened = audio_features.permute(0, 2, 1).contiguous().view(1, -1)
-        print("Audio features shape after flattening:",
-              audio_features_flattened.size())  # 应该输出 torch.Size([1, 1024])   print("Audio features shape after flattening:", audio_features_flattened.size())
+        audio_features_flattened = audio_features.permute(0, 2, 1).contiguous().view(batch_size, -1)
+        # print("Audio features shape after flattening:",audio_features_flattened.size())  # 应该输出 torch.Size([1, 1024])   print("Audio features shape after flattening:", audio_features_flattened.size())
         # assert audio_features_flattened.shape[1] == self.audio_fc.in_features
         audio_features_processed = self.audio_fc(audio_features_flattened)
         audio_features_processed = audio_features_processed.unsqueeze(1)
@@ -262,34 +258,39 @@ class ComplexMultiModalNN(nn.Module):
         visual_features = self.self_attention(visual_features, visual_features, visual_features, None)
         audio_features_processed= self.self_attention(audio_features_processed, audio_features_processed, audio_features_processed, None)
         # 合并视觉和听觉特征
-        combined_features = torch.cat((visual_features, audio_features_processed), dim=1)
-        print("Combined features shape:", combined_features.size())
+        combined_features = torch.cat((visual_features, audio_features_processed), dim=2)
+        # print("Combined features shape:", combined_features.size())
+        current_batch_size = combined_features.size(0)
 
         # 决定是否更新记忆
         update_memory_decision = torch.sigmoid(self.update_memory_decision(combined_features))
         # 使用 torch.any() 来检查是否有任何元素大于 0.5
         should_update_memory = torch.any(update_memory_decision > 0.5)
-        # 如果决定更新记忆
-        if memory is None or should_update_memory:
-            # 更新长期记忆
-            # 在 LSTM 单元的输入之前，确保提取正确的特征向量
-            # 假设 combined_features 的第一个维度是批次大小，第二个维度是特征数量，第三个维度是特征向量的维度
-            # 我们只需要第二个维度的特征向量
-            input_to_lstm = combined_features[:, 0, :]  # 提取第一个特征向量，形状应为 [1, 128]
 
-            # 现在将这个特征向量传递给 LSTM 单元
-            memory = (self.memory_cell(input_to_lstm, memory)[0], memory[1])  # 只取隐藏状态
-        # 假设 memory_expanded 的原始形状是 [1, 128]
-        # 我们需要将其调整为 [1, 2, 128] 以匹配 combined_features 的第二个维度
-        memory_expanded = memory[0].unsqueeze(1)  # 在第二个维度上增加一个维度
-        print("memory_expanded:", memory_expanded.size())  # 现在应该是 [1, 1, 128]
-        memory_expanded = memory_expanded.repeat(1, 2, 1)  # 重复第一个维度以匹配 combined_features 的第二个维度
-        print("memory_expanded after repetition:", memory_expanded.size())  # 现在应该是 [1, 2, 128]
-        # 连接后检查形状
+        # 如果决定更新记忆，或者memory是None（第一次调用时）
+        if memory is None or should_update_memory:
+            # 确保输入特征的批次大小为1
+            input_to_lstm = combined_features[:, 0, :]
+            # 初始化记忆状态，如果它们是None或者需要更新
+            if memory is None:
+                memory = (torch.zeros(1, 256), torch.zeros(1, 256))
+            # 更新记忆状态
+            if current_batch_size==1:
+                memory = self.memory_cell(input_to_lstm, memory)
+                # print("new memory size",memory[0].size())
+
+
+
+        # 将记忆状态扩展到与combined_features相同的批次大小
+        memory_expanded=memory[0]
+        # print("memory_expanded size",memory_expanded.size())
+        memory_expanded = memory_expanded.unsqueeze(0).repeat(current_batch_size, 1, 1)
+
         combined_input = torch.cat((combined_features, memory_expanded), dim=2)
-        print("combined_input shape after concatenation:", combined_input.size())
+
+        # 计算动作概率
+
         action_probs = self.action_net(combined_input)
-        print("Action probabilities shape:", action_probs.size())
         return action_probs, memory
 
 
@@ -351,43 +352,22 @@ def identify_reward(Rewardaudio_data):
         return 0.0  # 无奖励
 
 
-# 音频数据预处理
-def process_audio(audio_data):
-    # 这里可以添加音频数据的预处理步骤
-    # 假设音频数据已经是归一化的,我们只需要将其转换为适合模型的格式
-    # 假设模型期望的音频输入是固定长度的,例如1024个样本
-    if isinstance(audio_data, torch.Tensor):
-        print("audio_data is a PyTorch tensor.")
-    else:
-        # 使用struct.unpack处理音频数据
-        audio_data = struct.unpack('b' * 1024, audio_data)
-        audio_data = np.array(audio_data) / 32768.0
-        # 将音频数据转换为适合卷积层的形状
-        audio_data = np.reshape(audio_data, (1, 1, -1))  # [1, 1, sample_rate]
-        audio_data = torch.tensor(audio_data, dtype=torch.float)
-    return audio_data
 
 
-# 视频数据预处理
-def process_video(video_frame):
+def get_Video():
+    ret, frame = cap.read()  # 确保cap是一个已经打开的视频流
+    if not ret:
+        raise ValueError("无法从摄像头读取数据")
     # 将BGR图像转换为RGB格式并进行归一化
-    video_frame = cv2.cvtColor(video_frame, cv2.COLOR_BGR2RGB)
+    video_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
     video_frame = video_frame.astype(np.float32) / 255.0
 
     # 调整大小和归一化
     video_frame = cv2.resize(video_frame, (224, 224))
     video_frame = np.transpose(video_frame, (2, 0, 1))
 
-    return video_frame
-def get_Video():
-    ret, frame = cap.read()  # 确保cap是一个已经打开的视频流
-    if not ret:
-        raise ValueError("无法从摄像头读取数据")
-
-    # 预处理视频和音频数据
-    processed_video = process_video(frame)
     # 确保视频数据的形状是 [1, channels, height, width]
-    video_data= torch.tensor(processed_video).unsqueeze(0).float()
+    video_data= torch.tensor(video_frame).unsqueeze(0).float()
     return video_data
 def get_audio():
     # 尝试读取音频数据，添加异常处理
@@ -427,7 +407,15 @@ def get_audio():
         # 如果读取的数据超过1024字节，截断或分帧处理
         # 这里我们选择截断数据
         audio_data = audio_data[:1024]
-    audio_data=process_audio(audio_data)
+    if isinstance(audio_data, torch.Tensor):
+        print("audio_data is a PyTorch tensor.")
+    else:
+        # 使用struct.unpack处理音频数据
+        audio_data = struct.unpack('b' * 1024, audio_data)
+        audio_data = np.array(audio_data) / 32768.0
+        # 将音频数据转换为适合卷积层的形状
+        audio_data = np.reshape(audio_data, (1, 1, -1))  # [1, 1, sample_rate]
+        audio_data = torch.tensor(audio_data, dtype=torch.float)
     audio_data=audio_data.clone().detach().float()
     return audio_data
 # 初始化摄像头和麦克风
@@ -443,7 +431,7 @@ optimizer = optim.Adam(model.parameters(), lr=0.001)
 env = RobotEnv()
 
 # 初始化记忆状态
-memory = (torch.zeros(1, 128), torch.zeros(1, 128))  # LSTM的隐藏状态和细胞状态
+memory = None # LSTM的隐藏状态和细胞状态
 # 在训练循环的开始处设置 epsilon
 epsilon = 0.1  # 例如，设置为0.1
 # 训练循环
@@ -505,49 +493,11 @@ for episode in range(num_episodes):
 
 
         # 计算目标 Q 值
-        target_q_values = rewards + (1 - dones) * 0.99 * torch.max(model(next_states,next_audio_states,memory), dim=1).values
-        # 假设 rewards, next_states, next_audio_states, 和 dones 都是列表
-        # 首先，初始化一个空列表来存储每个样本的目标 Q 值
-        target_q_values_list = []
-
-        # 遍历每个样本
-        for i in range(len(rewards)):
-            # 计算当前样本的目标 Q 值
-            reward = rewards[i]
-            next_state = next_states[i]
-            next_audio_state = next_audio_states[i]
-            done = dones[i]
-
-            # 计算 max Q 值，如果模型接受单个样本作为输入
-            # 假设 model 返回的是一个名为 action_probs 的张量
-            action_probs, _ = model(next_state, next_audio_state, memory)
-            # 使用 torch.max 获取最大值
-            max_q_value = torch.max(action_probs, dim=1)[0]  # 获取最大值
-
-            # 计算当前样本的目标 Q 值
-            target_q_value = reward + (1 - done) * 0.99 * max_q_value
-
-            # 将计算出的目标 Q 值添加到列表中
-            target_q_values_list.append(target_q_value)
-
-        # 将列表转换为张量
-        target_q_values = torch.stack(target_q_values_list)
-        print("Target Q values shape:", target_q_values.size())
-        print("Target Q values:", target_q_values)
-
-
-
-        newact=actions.unsqueeze(1)
-
+        q_cal=torch.max(model(next_states,next_audio_states,memory)[0], dim=2)[0]
+        target_q_values = rewards + (1 - dones) * 0.99 * torch.max(model(next_states,next_audio_states,memory)[0], dim=2)[0]
 
         # 计算当前 Q 值
-        current_q_values = model(torch.cat(states,dim=0), torch.cat(audio_states,dim=0), torch.cat(memory,dim=0)).gather(1, actions.unsqueeze(1)).squeeze(1)
-
-        # 打印 Q 值列表
-        print("Current Q values:", current_q_values)
-
-        print("Current Q values shape:", current_q_values.size())
-        print("Current Q values:", current_q_values)
+        current_q_values=model(states, audio_states,memory)[0].gather(2, actions.unsqueeze(1)).squeeze(1)
         loss = F.mse_loss(current_q_values, target_q_values)
 
         optimizer.zero_grad()
@@ -555,7 +505,7 @@ for episode in range(num_episodes):
         optimizer.step()
 
     # 输出信息
-    print("Episode {episode}: Total Reward {total_reward}")
+    print("完成一次训练，已保存模型")
 
     # 保存模型
     torch.save(model.state_dict(), 'robot_model.pt')
