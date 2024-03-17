@@ -1,12 +1,12 @@
 # -*- coding: utf-8 -*-
 import io
 import random
-import string
 import struct
-
+import json
+import os
 import cv2
-import gtts
 import gym
+from gym import spaces
 import numpy as np
 import pyaudio
 import speech_recognition as sr
@@ -14,49 +14,32 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
-
-
-class AudioGenerator(nn.Module):
-    def __init__(self, input_size, audio_sample_rate, audio_length):
-        super(AudioGenerator, self).__init__()
-        # 假设输入特征向量的维度等于音频长度
-        self.fc = nn.Linear(input_size, audio_length)
-
-    def forward(self, x):
-        # 将输入特征向量转换为音频波形
-        audio_waveform = self.fc(x)
-
-        # 归一化音频波形到 [-1, 1] 的范围
-        audio_waveform = torch.tanh(audio_waveform)
-
-        return audio_waveform
-
-
+import pyttsx3
+import librosa
+import threading
 class ReplayBuffer:
     def __init__(self, capacity):
         self.buffer = []
         self.capacity = capacity
 
-    def push(self, state, action, reward, next_state,audio_state,next_audio_state, done):
+    def push(self, state, action, reward, next_state, audio_state, next_audio_state, done):
         if len(self.buffer) >= self.capacity:
             self.buffer.pop(0)
-        self.buffer.append((state, action, reward, next_state,audio_state,next_audio_state, done))
+        self.buffer.append((state, action, reward, next_state, audio_state, next_audio_state, done))
 
     def sample(self, batch_size):
         experiences = random.sample(self.buffer, batch_size)
-        states = torch.cat([exp[0] for exp in experiences],dim=0)
-        actions_int=[exp[1]  for exp in experiences]
-        actions = torch.tensor([(1,action) for action in actions_int], dtype=torch.int64)
-        rewards_float=[exp[2]  for exp in experiences]
-        rewards = torch.tensor([(1,reward) for reward in rewards_float], dtype=torch.float)
-        next_states = torch.cat([exp[3] for exp in experiences],dim=0)
-        audio_states= torch.cat([exp[4] for exp in experiences],dim=0)
-        next_audio_states = torch.cat([exp[5] for exp in experiences],dim=0)
-        dones_int=[ int(exp[6]) for exp in experiences]
-        dones = torch.tensor([(1,done) for done in dones_int], dtype=torch.float)
+        states = torch.cat([exp[0] for exp in experiences], dim=0)
+        actions = torch.cat([exp[1] for exp in experiences], dim=0)
+        rewards = torch.tensor([exp[2] for exp in experiences])
+        next_states = torch.cat([exp[3] for exp in experiences], dim=0)
+        audio_states = torch.cat([exp[4] for exp in experiences], dim=0)
+        next_audio_states = torch.cat([exp[5] for exp in experiences], dim=0)
+        dones = torch.tensor([int(exp[6]) for exp in experiences])
 
-        #states, actions, rewards, next_states, dones = zip(*experiences)
-        return states, actions, rewards, next_states, audio_states,next_audio_states,dones
+
+        # states, actions, rewards, next_states, dones = zip(*experiences)
+        return states, actions, rewards, next_states, audio_states, next_audio_states, dones
 
     def __len__(self):
         return len(self.buffer)
@@ -113,33 +96,20 @@ class RobotEnv(gym.Env):
             frames_per_buffer=1024
         )
         # 初始化记忆状态
-        self.memory =None
+        self.memory = None
         # 初始化环境状态
         self.state = None
-        self.audio_state=None
-        self.action_space = gym.spaces.Discrete(10)  # 假设有10种可能的动作
+        self.audio_state = None
         self.observation_space = gym.spaces.Box(low=0, high=255, shape=(224, 224, 3), dtype=float)  # 假设视频数据
 
-    def play_audio(self, audio_data):
-        # 播放音频数据
-        self.speaker.write(audio_data)
-
-    def text_to_speech(self, question_audio_text, language='en-US'):
-        # 使用gTTS库将文本转换为音频数据
-
-        tts = gtts.gTTS(text=question_audio_text, lang='zh-CN')  # 根据实际情况调整语言参数
-        with io.BytesIO() as output:
-            tts.write_to_fp(output)
-            audio_data = output.getvalue()
-        return audio_data
 
     def reset(self):
         # 重置环境状态
-        self.state,self.audio_state = self.get_initial_state()
-        return self.state,self.audio_state
+        self.state, self.audio_state = self.get_initial_state()
+        return self.state, self.audio_state
 
     def get_initial_state(self):
-        return get_Video(),get_audio()
+        return get_Video(), get_audio()
 
     def step(self, action):
         # 执行动作并返回新状态、奖励、完成标志和额外信息
@@ -148,16 +118,23 @@ class RobotEnv(gym.Env):
         # 选择动作
         if epsilon is not None and random.random() < epsilon:
             # 探索：随机选择一个动作
-            action = env.action_space.sample()
+            action =torch.rand(10, 64) # 随机动作与outputdim要一致
+
         else:
             # 使用模型执行动作并获取动作概率和记忆状态
 
-            action_probs, memory = model(state, audio_state, self.memory)
+            audio_data=action[0]
+
+            # 将音频波形转换为 NumPy 数组，并调用 play_audio 函数进行播放
+            # thread = threading.Thread(target=play_audio, args=(audio_data))
+            # thread.start()
+            play_audio(audio_data)
+            _, memory,_ = model(state, audio_state, self.memory)
             # 更新 self.memory 以供下一次调用 step 方法时使用
             self.memory = memory
-            action = torch.argmax(action_probs).item()
 
-            next_state,next_audio_state = self.get_initial_state()
+
+            next_state, next_audio_state = self.get_initial_state()
 
             done = False  # 假设环境不会结束
             info = {
@@ -170,7 +147,7 @@ class RobotEnv(gym.Env):
             # 使用识别出的奖励信号,如果没有提供,则使用默认值
             reward = identify_reward(audio_state)
 
-            return next_state, next_audio_state,reward, done, info
+            return next_state, next_audio_state, reward, done, info
 
 
 class ComplexMultiModalNN(nn.Module):
@@ -179,7 +156,7 @@ class ComplexMultiModalNN(nn.Module):
         super(ComplexMultiModalNN, self).__init__()
 
         # 初始化LSTM层
-        self.memory_cell = nn.LSTMCell(256, 256)  # 假设输入和隐藏状态的维度都是256
+        self.memory_cell =nn.LSTMCell(256, 256)
 
         # 初始化记忆更新决策层
         self.update_memory_decision = nn.Linear(256, 1)
@@ -204,25 +181,30 @@ class ComplexMultiModalNN(nn.Module):
         # 全连接层
         self.audio_fc = nn.Linear(65536, 128)  # 假设你需要将音频特征从1024维降到128维
 
-
         # 自注意力层
         self.self_attention = SelfAttention(embed_size=128, heads=4)
-
-        # 动作生成部分
-        self.action_net = nn.Sequential(
-            nn.Linear(512, 512),
-            nn.ReLU(),
-            nn.Linear(512, 10)  # 假设有10种可能的动作
-        )
-
-
+        inputfeaturesnum=512
+        outputdim=64
+        # 定义新的输出层，每个维度一个输出头
+        self.output_heads = nn.ModuleList([
+            nn.Linear(inputfeaturesnum, outputdim),  # 语音数据，假设输出为1维
+            nn.Linear(inputfeaturesnum, outputdim),  # 视频数据，假设输出为64维
+            nn.Linear(inputfeaturesnum, outputdim),  # 双腿和脚移动数据
+            nn.Linear(inputfeaturesnum, outputdim),  # 双手臂和手掌移动数据
+            nn.Linear(inputfeaturesnum, outputdim),  # 腰部转动数据
+            nn.Linear(inputfeaturesnum, outputdim),  # 头部转动数据
+            nn.Linear(inputfeaturesnum, outputdim),  # 语音对应的文本数据
+            nn.Linear(inputfeaturesnum, outputdim),  # 面部表情数据
+            nn.Linear(inputfeaturesnum, outputdim),  # 接入互联网通过TCP的发包数据
+            nn.Linear(inputfeaturesnum, outputdim)   # Python代码数据
+        ])
+        # 定义Q值输出层，输出维度与动作空间的维度相同
+        self.q_value_head = nn.Linear(inputfeaturesnum, 10)  # 假设最终特征维度为512，动作空间维度为10
     def forward(self, visual_input, audio_input, memory=None):
 
         if torch.cuda.is_available():
             visual_input = visual_input.cuda()
             audio_input = audio_input.cuda()
-
-
 
         # 视觉特征提取
         # print(" visual_input shape:", visual_input.size())
@@ -235,8 +217,6 @@ class ComplexMultiModalNN(nn.Module):
         # 计算卷积层输出的特征图的展平大小
         batch_size = visual_input.size(0)
         # print("batch_size:", batch_size)
-        num_features = visual_input.size(1) * visual_input.size(2) * visual_input.size(3)
-        # print("num_features:", num_features)
         # 展平特征图
         visual_input_flattened = visual_input.view(batch_size, -1)  # 展平为 [batch_size, num_features]
         # print("visual_input_flattened:", visual_input_flattened)
@@ -256,7 +236,8 @@ class ComplexMultiModalNN(nn.Module):
         audio_features_processed = audio_features_processed.unsqueeze(1)
         # 自注意力
         visual_features = self.self_attention(visual_features, visual_features, visual_features, None)
-        audio_features_processed= self.self_attention(audio_features_processed, audio_features_processed, audio_features_processed, None)
+        audio_features_processed = self.self_attention(audio_features_processed, audio_features_processed,
+                                                       audio_features_processed, None)
         # 合并视觉和听觉特征
         combined_features = torch.cat((visual_features, audio_features_processed), dim=2)
         # print("Combined features shape:", combined_features.size())
@@ -273,27 +254,74 @@ class ComplexMultiModalNN(nn.Module):
             input_to_lstm = combined_features[:, 0, :]
             # 初始化记忆状态，如果它们是None或者需要更新
             if memory is None:
-                memory = (torch.zeros(1, 256), torch.zeros(1, 256))
+                memory = load_model_memory(memory_states_filename)
             # 更新记忆状态
-            if current_batch_size==1:
+            if current_batch_size == 1:
                 memory = self.memory_cell(input_to_lstm, memory)
                 # print("new memory size",memory[0].size())
 
-
-
         # 将记忆状态扩展到与combined_features相同的批次大小
-        memory_expanded=memory[0]
+        memory_expanded = memory[0]
         # print("memory_expanded size",memory_expanded.size())
         memory_expanded = memory_expanded.unsqueeze(0).repeat(current_batch_size, 1, 1)
 
         combined_input = torch.cat((combined_features, memory_expanded), dim=2)
 
         # 计算动作概率
+        outputs = [head(combined_input) for head in self.output_heads]
+        combined_outputs = torch.cat(outputs, dim=0)
+        # 计算 Q 值
+        q_values = self.q_value_head(combined_input)  # 使用 Q 值头计算 Q 值
+        return combined_outputs, memory,q_values
+    def get_memory():
+        return memory
 
-        action_probs = self.action_net(combined_input)
-        return action_probs, memory
 
+def play_audio(audio_data):
+    # 处理音频假设动作张量的第一个维度是生成语音所需的数据
+    # 假设 action[0] 是模型输出的梅尔频谱图特征
+    action_mel = audio_data.detach().numpy()
 
+    # 将梅尔频谱图转换为音频波形
+    # 这里使用 librosa 库作为示例，您可能需要根据您的特征类型调整参数
+    sampling_rate = 44100  # 假设采样率为 22050 Hz
+    # 从梅尔频谱图恢复幅度谱
+    S_inv_mel = np.maximum(action_mel, np.finfo(float).eps, out=action_mel)
+    S_db = librosa.power_to_db(S_inv_mel, ref=np.max)
+
+    # 将幅度谱转换为频谱的幅度
+    S_spec = np.power(10.0, S_db / 20)
+
+    # 假设原始音频的采样率和目标采样率相同
+    hop_length = int(sampling_rate // 4)  # 假设帧长为 2048，hop length 为 512
+    win_length = int(sampling_rate // 2)  # 假设帧长为 2048
+
+    # 重建波形
+    y = librosa.feature.inverse.mel_to_audio(S_spec, sr=sampling_rate, n_fft=win_length, hop_length=hop_length)
+
+    # 将重建的波形转换为 int16 类型以便播放
+    audio_np = np.int16(y * 32767)
+
+    # 使用PyAudio播放音频
+    pyaudio_instance = pyaudio.PyAudio()
+    audio_stream = pyaudio_instance.open(format=pyaudio.paInt16,
+                                         channels=1,
+                                         rate=sampling_rate,
+                                         output=True,
+                                         frames_per_buffer=1024)
+    audio_stream.write(audio_np.tobytes())
+    audio_stream.stop_stream()
+    audio_stream.close()
+    pyaudio_instance.terminate()
+def text_to_speech(text, language='Chinese'):
+    # 初始化语音引擎
+    engine = pyttsx3.init()
+    # 设置语言
+    engine.setProperty('voice', language)
+    # 说一句话
+    engine.say(text)
+    # 运行语音引擎
+    engine.runAndWait()
 def compute_reward(self, next_state):
     # 假设我们有一个目标物体,我们想要机器人将其移动到特定位置
     # next_state包含了目标物体的当前位置
@@ -327,22 +355,8 @@ def check_done(self, next_state):
 
 
 def identify_reward(Rewardaudio_data):
-    Rewardaudio_data = sr.AudioData(Rewardaudio_data, 44100, sample_width=2)
-    # 初始化语音识别器
-    recognizer = sr.Recognizer()
-
-    # 使用语音识别API将音频数据转换为文本
-    try:
-        #text = recognizer.recognize_google(Rewardaudio_data, language='en-US')
-        text="well done"
-        print("Recognized speech: ", text)
-    except sr.UnknownValueError:
-        print("Google Speech Recognition could not understand audio")
-        return 0.0  # 如果无法识别,则返回0作为奖励
-    except sr.RequestError as e:
-        print("Could not request results from Google Speech Recognition service; ", e)
-        return 0.0  # 如果请求失败,则返回0作为奖励
-
+    # 未实现对动作的负反馈，比如遇到阻力
+    text = "well done"
     # 解析文本以识别表扬
     if "well done" in text.lower() or "good job" in text.lower():
         return 1.0  # 正面奖励
@@ -350,8 +364,6 @@ def identify_reward(Rewardaudio_data):
         return -1.0  # 负面奖励
     else:
         return 0.0  # 无奖励
-
-
 
 
 def get_Video():
@@ -367,8 +379,10 @@ def get_Video():
     video_frame = np.transpose(video_frame, (2, 0, 1))
 
     # 确保视频数据的形状是 [1, channels, height, width]
-    video_data= torch.tensor(video_frame).unsqueeze(0).float()
+    video_data = torch.tensor(video_frame).unsqueeze(0).float()
     return video_data
+
+
 def get_audio():
     # 尝试读取音频数据，添加异常处理
     try:
@@ -416,14 +430,44 @@ def get_audio():
         # 将音频数据转换为适合卷积层的形状
         audio_data = np.reshape(audio_data, (1, 1, -1))  # [1, 1, sample_rate]
         audio_data = torch.tensor(audio_data, dtype=torch.float)
-    audio_data=audio_data.clone().detach().float()
+    audio_data = audio_data.clone().detach().float()
     return audio_data
+# 加载模型记忆状态
+def load_model_memory(filename):
+    if os.path.exists(filename):
+        with open(filename, 'r') as f:
+            memory_states = json.load(f)
+            # 假设隐藏状态和细胞状态是两个张量
+            cell_state = torch.tensor(memory_states['cell'])
+            hidden_state = torch.tensor(memory_states['hidden'])
+        memory=(cell_state,hidden_state )
+        print(f'Model memory loaded from {filename}')
+    else:
+        print(f'No model memory found at {filename}. Creating new memory.')
+        # 初始化新的记忆状态并保存
+        memory=(torch.zeros(1, 256), torch.zeros(1, 256))
+
+    return memory
+
+# 保存模型记忆状态
+def save_model_memory(memory, filename):
+    memory_states = {'cell': memory[0].tolist(),'hidden': memory[1].tolist()}
+    with open(filename, 'w') as f:
+        json.dump(memory_states, f)
+    print(f'Model memory saved to {filename}')
+
+# JSON文件名用于存储模型记忆状态
+memory_states_filename = 'model_memory.json'
+model_path='robot_model.pt'
 # 初始化摄像头和麦克风
 cap = cv2.VideoCapture(0)
-
 # 初始化模型
 model = ComplexMultiModalNN()
-
+if os.path.exists(model_path):
+    model.load_state_dict(torch.load(model_path), strict=False)
+    print(f'Loaded model state from {model_path}')
+else:
+    print(f'No model state found at {model_path}. Starting training from scratch.')
 # 初始化优化器
 optimizer = optim.Adam(model.parameters(), lr=0.001)
 
@@ -431,7 +475,7 @@ optimizer = optim.Adam(model.parameters(), lr=0.001)
 env = RobotEnv()
 
 # 初始化记忆状态
-memory = None # LSTM的隐藏状态和细胞状态
+memory = None  # LSTM的隐藏状态和细胞状态
 # 在训练循环的开始处设置 epsilon
 epsilon = 0.1  # 例如，设置为0.1
 # 训练循环
@@ -440,64 +484,66 @@ num_episodes = 20  # 设置一个较大的episode数,以便模型可以持续学
 for episode in range(num_episodes):
     # 重置环境和记忆
     replay_buffer = ReplayBuffer(capacity=10000)
-    state,audio_state = env.reset()
+    state, audio_state = env.reset()
 
     total_reward = 0
     print("开始循环训练：", episode)
     # 执行动作并收集经验
-    total_timestip=10
-    buffer_count=0
+    total_timestip = 100
+    buffer_count = 0
     for t in range(total_timestip):  # 假设每个episode有1000个时间步
 
         print("时间步：", t)
         # 选择动作
         model.eval()
         with torch.no_grad():
-
-            video_tensor =get_Video()
+            video_tensor = get_Video()
             audio_tensor = get_audio()
-            action_probs, memory = model(video_tensor, audio_tensor, memory)
-        action = torch.argmax(action_probs).item()
+            action, memory,_ = model(video_tensor, audio_tensor, memory)
 
+        # 执行动作
         result = env.step(action)
         if result is not None:
-            next_state, next_audio_state,reward, done, info = result
+            next_state, next_audio_state, reward, done, info = result
 
-            replay_buffer.push(state, action, reward, next_state, audio_state,next_audio_state,done)
+            replay_buffer.push(state, action, reward, next_state, audio_state, next_audio_state, done)
             state = next_state
-            audio_state=next_audio_state
+            audio_state = next_audio_state
             total_reward += reward
-            buffer_count=buffer_count+1
+            buffer_count = buffer_count + 1
         else:
             # 处理返回值为None的情况
             print("env.step returned None, which is not iterable.")
 
-
         # 如果是最后一个时间步，播放询问音频
-        if t == total_timestip-1:
+        if t == total_timestip - 1:
             print("我干得好吗？此处已经注释")
-            #question_audio = env.text_to_speech("我干得好吗？")
-            #env.play_audio(question_audio)
+            # text_to_speech("我干得好吗？")
 
         # 如果episode结束，跳出循环
-        #if done:
-            #break
+        # if done:
+        # break
 
     # 训练模型
     print("实施训练")
     model.train()
     for _ in range(buffer_count):  # 每个episode训练buffer_count次
 
-        states, actions, rewards, next_states, audio_states,next_audio_states,dones = replay_buffer.sample(batch_size=6)
+        states, actions, rewards, next_states, audio_states, next_audio_states, dones = replay_buffer.sample(
+            batch_size=4)
         # 确保 dones 是一个一维的布尔张量
 
-
         # 计算目标 Q 值
-        q_cal=torch.max(model(next_states,next_audio_states,memory)[0], dim=2)[0]
-        target_q_values = rewards + (1 - dones) * 0.99 * torch.max(model(next_states,next_audio_states,memory)[0], dim=2)[0]
+        # 假设 model 的第一个输出是包含Q值的多头输出，我们需要选择对应的输出头
+        q_values_next = model(next_states, next_audio_states, memory)[2]  # 获取下一个状态的Q值
+        max_q_values_next = torch.max(q_values_next, dim=1)[0]  # 选择每个样本的最大Q值
+        # print("dones", dones.size())
+        rewards_expanded = rewards.unsqueeze(1).repeat(1, max_q_values_next.size(1))
+        dones_expanded = dones.unsqueeze(1).repeat(1, max_q_values_next.size(1))
+        target_q_values = rewards_expanded + (1 - dones_expanded) * 0.99 * max_q_values_next  # 计算目标Q值
 
         # 计算当前 Q 值
-        current_q_values=model(states, audio_states,memory)[0].gather(2, actions.unsqueeze(1)).squeeze(1)
+        current_q_values = model(states, audio_states, memory)[2].squeeze(1)
         loss = F.mse_loss(current_q_values, target_q_values)
 
         optimizer.zero_grad()
@@ -507,8 +553,10 @@ for episode in range(num_episodes):
     # 输出信息
     print("完成一次训练，已保存模型")
 
-    # 保存模型
-    torch.save(model.state_dict(), 'robot_model.pt')
+    # 动态更新模型文件
+    torch.save(model.state_dict(), model_path)
+    # 训练结束后更新记忆状态
+    save_model_memory(memory, memory_states_filename)
 # 在所有episode完成后，执行资源释放
 cap.release()  # 释放摄像头资源
 
@@ -517,4 +565,3 @@ if __name__ == '__main__':
     # ...省略训练循环...
     # 在程序的最后，执行资源释放
     cap.release()
-
