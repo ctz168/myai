@@ -141,7 +141,7 @@ class RobotEnv(gym.Env):
             # 将音频波形转换为 NumPy 数组，并调用 play_audio 函数进行播放
             thread = threading.Thread(target=play_audio, args=(audio_data))
             thread.start()
-            #play_audio(audio_data)
+            # play_audio(audio_data)
             _, memory,_ = model(state, audio_state, self.memory)
             # 更新 self.memory 以供下一次调用 step 方法时使用
             self.memory = memory
@@ -385,14 +385,15 @@ def get_Video():
     ret, frame = cap.read()  # 确保cap是一个已经打开的视频流
     if not ret:
         raise ValueError("无法从摄像头读取数据")
-    cv2.imshow('Camera', frame)
+
     # 将BGR图像转换为RGB格式并进行归一化
     video_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
     video_frame = video_frame.astype(np.float32) / 255.0
 
     # 调整大小和归一化
     video_frame = cv2.resize(video_frame, (224, 224))
-
+    cv2.imshow('Frame', video_frame)
+    cv2.waitKey(10)
     video_frame = np.transpose(video_frame, (2, 0, 1))
 
     # 确保视频数据的形状是 [1, channels, height, width]
@@ -461,20 +462,16 @@ def save_model_memory(memory, filename):
 # JSON文件名用于存储模型记忆状态
 memory_states_filename = 'model_memory.json'
 model_path='robot_model.pt'
-# 初始化摄像头和麦克风
-# 判断操作系统是否为macOS
-if platform.system() == "Darwin":
+# 初始化摄像头
+if platform.system() == "Darwin":# 判断操作系统是否为macOS
     cap = cv2.VideoCapture(0)
 else:
     webcamipport = 'http://192.168.1.116:8080/video'
     cap = cv2.VideoCapture(webcamipport)
 
-# 创建一个名为'Camera'的窗口
-cv2.namedWindow('Camera', cv2.WINDOW_NORMAL)
-
-# 设置窗口的初始大小，例如设置为宽800像素，高600像素
-cv2.resizeWindow('Camera', 800, 600)
-
+cv2.namedWindow('Frame', cv2.WINDOW_NORMAL)
+cv2.resizeWindow('Frame', 224, 224)
+cv2.waitKey(1000)
 # 初始化模型
 model = ComplexMultiModalNN()
 if os.path.exists(model_path):
@@ -503,7 +500,7 @@ for episode in range(num_episodes):
     total_reward = 0
     print("开始循环训练：", episode)
     # 执行动作并收集经验
-    total_timestip = 100
+    total_timestip = 500
     buffer_count = 0
     for t in range(total_timestip):  # 假设每个episode有1000个时间步
 
