@@ -378,15 +378,21 @@ def identify_reward(Rewardaudio_data):
 
 
 def get_Video():
+
+    if not cap.isOpened():
+        print("Cannot open camera")
+        exit()
     ret, frame = cap.read()  # 确保cap是一个已经打开的视频流
     if not ret:
         raise ValueError("无法从摄像头读取数据")
+    cv2.imshow('Camera', frame)
     # 将BGR图像转换为RGB格式并进行归一化
     video_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
     video_frame = video_frame.astype(np.float32) / 255.0
 
     # 调整大小和归一化
     video_frame = cv2.resize(video_frame, (224, 224))
+
     video_frame = np.transpose(video_frame, (2, 0, 1))
 
     # 确保视频数据的形状是 [1, channels, height, width]
@@ -463,7 +469,11 @@ else:
     webcamipport = 'http://192.168.1.116:8080/video'
     cap = cv2.VideoCapture(webcamipport)
 
+# 创建一个名为'Camera'的窗口
+cv2.namedWindow('Camera', cv2.WINDOW_NORMAL)
 
+# 设置窗口的初始大小，例如设置为宽800像素，高600像素
+cv2.resizeWindow('Camera', 800, 600)
 
 # 初始化模型
 model = ComplexMultiModalNN()
