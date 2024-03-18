@@ -17,6 +17,19 @@ import torch.optim as optim
 import librosa
 import platform
 import threading
+# 假设的解码器函数
+class AudioDecoder(nn.Module):
+    def __init__(self):
+        super(AudioDecoder, self).__init__()
+        self.linear = nn.Linear(64, 1024)
+        self.activation = nn.ReLU()
+
+    def forward(self, x):
+        x = self.linear(x)
+        x = self.activation(x)
+        return x
+
+
 class ReplayBuffer:
     def __init__(self, capacity):
         self.buffer = []
@@ -126,9 +139,9 @@ class RobotEnv(gym.Env):
             audio_data=action[0]
 
             # 将音频波形转换为 NumPy 数组，并调用 play_audio 函数进行播放
-            # thread = threading.Thread(target=play_audio, args=(audio_data))
-            # thread.start()
-            play_audio(audio_data)
+            thread = threading.Thread(target=play_audio, args=(audio_data))
+            thread.start()
+            #play_audio(audio_data)
             _, memory,_ = model(state, audio_state, self.memory)
             # 更新 self.memory 以供下一次调用 step 方法时使用
             self.memory = memory
@@ -179,7 +192,7 @@ class ComplexMultiModalNN(nn.Module):
         self.audio_conv1 = nn.Conv1d(1, 32, kernel_size=3, stride=1, padding=1)
         self.audio_conv2 = nn.Conv1d(32, 64, kernel_size=3, stride=1, padding=1)
         # 全连接层
-        self.audio_fc = nn.Linear(65536, 128)  # 假设你需要将音频特征从1024维降到128维
+        self.audio_fc = nn.Linear(64 * 1024, 128)  # 假设你需要将音频特征从1024维降到128维
 
         # 自注意力层
         self.self_attention = SelfAttention(embed_size=128, heads=4)
@@ -278,41 +291,39 @@ class ComplexMultiModalNN(nn.Module):
 
 
 def play_audio(audio_data):
-    # 处理音频假设动作张量的第一个维度是生成语音所需的数据
-    # 假设 action[0] 是模型输出的梅尔频谱图特征
-    action_mel = audio_data.detach().numpy()
+    # 假设 audio_data 是一个形状为 (1, 64) 的浮点数张量
+    # 首先确保 audio_data 的值在 [-1, 1] 范围内
+    audio_data = torch.clamp(audio_data, -1, 1)
 
-    # 将梅尔频谱图转换为音频波形
-    # 这里使用 librosa 库作为示例，您可能需要根据您的特征类型调整参数
-    sampling_rate = 44100  # 假设采样率为 22050 Hz
-    # 从梅尔频谱图恢复幅度谱
-    S_inv_mel = np.maximum(action_mel, np.finfo(float).eps, out=action_mel)
-    S_db = librosa.power_to_db(S_inv_mel, ref=np.max)
+    # 将浮点数张量转换为 int16 类型
+    # 需要先调用 .cpu() 将张量移动到 CPU，然后使用 .float() 转换为浮点数
+    audio_data_int16 = (audio_data.float() * np.iinfo(np.int16).max).to(torch.int16)
 
-    # 将幅度谱转换为频谱的幅度
-    S_spec = np.power(10.0, S_db / 20)
+    # 现在 audio_data_int16 是一个形状为 (1, 64) 的 int16 类型的张量
+    # 我们需要将其转换为 NumPy 数组并去除批次维度 (1,) 以便使用 pyaudio 播放
+    audio_data_int16_np = audio_data_int16.squeeze(0).numpy()
 
-    # 假设原始音频的采样率和目标采样率相同
-    hop_length = int(sampling_rate // 4)  # 假设帧长为 2048，hop length 为 512
-    win_length = int(sampling_rate // 2)  # 假设帧长为 2048
+    # 初始化 PyAudio 实例
+    p = pyaudio.PyAudio()
 
-    # 重建波形
-    y = librosa.feature.inverse.mel_to_audio(S_spec, sr=sampling_rate, n_fft=win_length, hop_length=hop_length)
+    # 音频流参数
+    stream_params = {
+        'format': pyaudio.paInt16,
+        'channels': 1,  # 单声道
+        'rate': 44100  # 假设的采样率
+    }
 
-    # 将重建的波形转换为 int16 类型以便播放
-    audio_np = np.int16(y * 32767)
+    # 打开一个流（stream）以播放音频
+    stream = p.open(**stream_params, output=True)
 
-    # 使用PyAudio播放音频
-    pyaudio_instance = pyaudio.PyAudio()
-    audio_stream = pyaudio_instance.open(format=pyaudio.paInt16,
-                                         channels=1,
-                                         rate=sampling_rate,
-                                         output=True,
-                                         frames_per_buffer=1024)
-    audio_stream.write(audio_np.tobytes())
-    audio_stream.stop_stream()
-    audio_stream.close()
-    pyaudio_instance.terminate()
+    # 播放音频
+    stream.write(audio_data_int16_np.tobytes())
+
+    # 关闭 PyAudio 流
+    stream.stop_stream()
+    stream.close()
+    p.terminate()
+
 def text_to_speech(text, language='Chinese'):
     # 初始化语音引擎
     engine = pyttsx3.init()
@@ -391,18 +402,18 @@ def get_audio():
         channels=1,
         rate=44100,
         input=True,
-        frames_per_buffer=1024  # 保持原来的设置
+        frames_per_buffer=512  # 保持原来的设置
     )
-    audio_data = audio_stream.read(1024)  # 确保audio_stream是一个已经打开的音频流
+    audio_data = audio_stream.read(512)  # 确保audio_stream是一个已经打开的音频流
     audio_stream.stop_stream()
     audio_stream.close()  # 终止PyAudio实例
-
+    alen=len(audio_data)
     # 检查读取的音频数据长度
-    if len(audio_data) < 1024:
+    if alen < 1024:
         # 如果读取的数据不足1024字节，填充剩余的部分
         audio_data += b'\x00' * (1024 - len(audio_data))
     # 检查读取的音频数据长度
-    if len(audio_data) > 1024:
+    if alen > 1024:
         # 如果读取的数据超过1024字节，截断或分帧处理
         # 这里我们选择截断数据
         audio_data = audio_data[:1024]
@@ -444,7 +455,7 @@ def save_model_memory(memory, filename):
 # JSON文件名用于存储模型记忆状态
 memory_states_filename = 'model_memory.json'
 model_path='robot_model.pt'
-
+# 初始化摄像头和麦克风
 # 判断操作系统是否为macOS
 if platform.system() == "Darwin":
     cap = cv2.VideoCapture(0)
@@ -452,7 +463,7 @@ else:
     webcamipport = 'http://192.168.1.116:8080/video'
     cap = cv2.VideoCapture(webcamipport)
 
-# 初始化摄像头和麦克风
+
 
 # 初始化模型
 model = ComplexMultiModalNN()
