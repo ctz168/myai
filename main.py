@@ -14,8 +14,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
-import pyttsx3
 import librosa
+import platform
 import threading
 class ReplayBuffer:
     def __init__(self, capacity):
@@ -385,33 +385,18 @@ def get_Video():
 
 def get_audio():
     # 尝试读取音频数据，添加异常处理
-    try:
-        audio_stream = pyaudio.PyAudio().open(
-            format=pyaudio.paInt16,
-            channels=1,
-            rate=44100,
-            input=True,
-            frames_per_buffer=1024  # 保持原来的设置
-        )
-        audio_data = audio_stream.read(1024)  # 确保audio_stream是一个已经打开的音频流
-        audio_stream.stop_stream()
-        audio_stream.close()  # 终止PyAudio实例
-    except OSError as e:
-        if e.errno == -9981:
-            print("音频输入溢出，重置音频流...")
-            # 关闭当前音频流
-            # 创建新的音频流
-            audio_stream = pyaudio.PyAudio().open(
-                format=pyaudio.paInt16,
-                channels=1,
-                rate=44100,
-                input=True,
-                frames_per_buffer=1024  # 保持原来的设置
-            )
-            # 重新尝试读取音频数据
-            audio_data = audio_stream.read(1024)
-        else:
-            raise  # 抛出其他类型的异常
+
+    audio_stream = pyaudio.PyAudio().open(
+        format=pyaudio.paInt16,
+        channels=1,
+        rate=44100,
+        input=True,
+        frames_per_buffer=1024  # 保持原来的设置
+    )
+    audio_data = audio_stream.read(1024)  # 确保audio_stream是一个已经打开的音频流
+    audio_stream.stop_stream()
+    audio_stream.close()  # 终止PyAudio实例
+
     # 检查读取的音频数据长度
     if len(audio_data) < 1024:
         # 如果读取的数据不足1024字节，填充剩余的部分
@@ -459,8 +444,16 @@ def save_model_memory(memory, filename):
 # JSON文件名用于存储模型记忆状态
 memory_states_filename = 'model_memory.json'
 model_path='robot_model.pt'
+
+# 判断操作系统是否为macOS
+if platform.system() == "Darwin":
+    cap = cv2.VideoCapture(0)
+else:
+    webcamipport = 'http://192.168.1.116:8080/video'
+    cap = cv2.VideoCapture(webcamipport)
+
 # 初始化摄像头和麦克风
-cap = cv2.VideoCapture(0)
+
 # 初始化模型
 model = ComplexMultiModalNN()
 if os.path.exists(model_path):
