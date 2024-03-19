@@ -473,7 +473,7 @@ attention=None
 showCamera=True
 # JSON文件名用于存储模型记忆状态
 memory_filename = 'model_memory.json'
-attention_memory_filename = 'model_memory.json'
+attention_memory_filename = 'attention_model_memory.json'
 model_path='robot_model.pt'
 global_outputdim=100*100*3
 # 初始化摄像头
