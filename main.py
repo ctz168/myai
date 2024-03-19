@@ -254,7 +254,7 @@ class ComplexMultiModalNN(nn.Module):
         combined_input=combined_features.view(current_batch_size, 1280)
 
         combined_input = torch.cat((combined_input, self.memory[0].repeat(current_batch_size, 1)), dim=1)
-        print("combined_input",combined_input.size())
+        # print("combined_input",combined_input.size())
         # 计算动作概率
         outputs = [head(combined_input) for head in self.output_heads]
         combined_outputs = torch.cat(outputs, dim=0)
@@ -277,7 +277,8 @@ class ComplexMultiModalNN(nn.Module):
                 # 决定是否更新记忆
 
                 # 使用 torch.any() 来检查是否有任何元素大于 0.5
-
+        memory=self.memory
+        attention=self.attention
         return combined_outputs, q_values, memory, attention
     # 保存模型记忆状态
 
@@ -467,6 +468,8 @@ input_value_size=input_video_size+input_audio_size
 # 在训练循环的开始处设置 epsilon
 epsilon = 1.0  # 初始探索率
 epsilon_decay = 0.99  # 探索率衰减因子
+memory=None
+attention=None
 showCamera=True
 # JSON文件名用于存储模型记忆状态
 memory_filename = 'model_memory.json'
@@ -510,7 +513,7 @@ for episode in range(num_episodes):
     total_reward = 0
     print("开始循环训练：", episode)
     # 执行动作并收集经验
-    total_timestip = 500
+    total_timestip = 10
     buffer_count = 0
     done=False
     for t in range(total_timestip):  # 假设每个episode有1000个时间步
@@ -573,7 +576,8 @@ for episode in range(num_episodes):
         # 现在 target_weights 包含了每个样本的目标权重
         optimizer.zero_grad()  # 清空之前的梯度
         outputs = weight_model(actions)  # 前向传播
-        loss = criterion(outputs, target_weights)  # 计算损失
+        target_weights= target_weights.unsqueeze(1).unsqueeze(1)
+        loss = criterion(outputs, target_weights.repeat(1, 10, 1))  # 计算损失
         loss.backward()  # 反向传播
         optimizer.step()  # 更新权重
 
