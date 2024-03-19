@@ -461,7 +461,7 @@ def save_model_memory(memory,attention):
 
 
 
-
+total_timestip = 500
 input_video_size=512
 input_audio_size=128
 input_value_size=input_video_size+input_audio_size
@@ -513,7 +513,7 @@ for episode in range(num_episodes):
     total_reward = 0
     print("开始循环训练：", episode)
     # 执行动作并收集经验
-    total_timestip = 10
+
     buffer_count = 0
     done=False
     for t in range(total_timestip):  # 假设每个episode有1000个时间步
