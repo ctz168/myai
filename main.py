@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 import io
+import math
 import random
 import struct
 import json
@@ -15,18 +16,19 @@ import torch.nn.functional as F
 import torch.optim as optim
 import platform
 import threading
-# 假设的解码器函数
-class AudioDecoder(nn.Module):
-    def __init__(self):
-        super(AudioDecoder, self).__init__()
-        self.linear = nn.Linear(64, 1024)
-        self.activation = nn.ReLU()
 
-    def forward(self, x):
-        x = self.linear(x)
-        x = self.activation(x)
-        return x
+# 定义权重学习模型
+class WeightLearningModel(nn.Module):
+    def __init__(self, input_dim, output_dim):
+        super(WeightLearningModel, self).__init__()
+        self.fc1 = nn.Linear(input_dim, 128)
+        self.fc2 = nn.Linear(128, 64)
+        self.fc3 = nn.Linear(64, output_dim)
 
+    def forward(self, action_results):
+        x = torch.relu(self.fc1(action_results))
+        x = torch.relu(self.fc2(x))
+        return self.fc3(x)
 
 class ReplayBuffer:
     def __init__(self, capacity):
@@ -41,7 +43,7 @@ class ReplayBuffer:
     def sample(self, batch_size):
         experiences = random.sample(self.buffer, batch_size)
         states = torch.cat([exp[0] for exp in experiences], dim=0)
-        actions = torch.cat([exp[1] for exp in experiences], dim=0)
+        actions = torch.cat([exp[1].unsqueeze(0) for exp in experiences], dim=0)
         rewards = torch.tensor([exp[2] for exp in experiences])
         next_states = torch.cat([exp[3] for exp in experiences], dim=0)
         audio_states = torch.cat([exp[4] for exp in experiences], dim=0)
@@ -54,7 +56,6 @@ class ReplayBuffer:
 
     def __len__(self):
         return len(self.buffer)
-
 
 class SelfAttention(nn.Module):
     def __init__(self, embed_size, heads, condition_size):
@@ -141,7 +142,7 @@ class RobotEnv(gym.Env):
         play_video(video_data)
         thread = threading.Thread(target=play_audio, args=(audio_data)).start() # 调用 play_audio 函数进行播放
         # play_audio(audio_data)
-        _, _ = model(state, audio_state)
+
         # 更新 self.memory 以供下一次调用 step 方法时使用
 
         next_state, next_audio_state = self.get_initial_state()
@@ -162,14 +163,14 @@ class ComplexMultiModalNN(nn.Module):
     def __init__(self):
         # 初始化卷积层
         super(ComplexMultiModalNN, self).__init__()
-        self.memory=None
         # 初始化LSTM层
         self.memory_cell =nn.LSTMCell(input_value_size, input_value_size)
         # 假设我们使用一个LSTM来维护自注意力隐藏状态
         self.acttention_lstm=nn.LSTMCell(input_value_size, input_value_size)
         # 初始化记忆更新决策层
         self.update_memory_decision = nn.Linear(input_value_size, 1)
-
+        self.memory=None
+        self.attention=None
         # 视觉处理部分
         # 添加视频卷积层
         self.conv1 = nn.Conv2d(3, 32, kernel_size=3, stride=1, padding=1)
@@ -209,8 +210,9 @@ class ComplexMultiModalNN(nn.Module):
             nn.Linear(inputfeaturesnum, outputdim)   # Python代码数据
         ])
         # 定义Q值输出层，输出维度与动作空间的维度相同
-        self.q_value_head = nn.Linear(inputfeaturesnum, 10)  # 假设最终特征维度为512，动作空间维度为10
-    def forward(self, visual_input, audio_input):
+        self.q_value_head = nn.Linear(inputfeaturesnum+10*outputdim, 10)  # 假设最终特征维度为512，动作空间维度为10
+
+    def forward(self, visual_input, audio_input, memory=None, attention=None,actions=None):
 
         if torch.cuda.is_available():
             visual_input = visual_input.cuda()
@@ -232,7 +234,7 @@ class ComplexMultiModalNN(nn.Module):
         # print("visual_input_flattened:", visual_input_flattened)
         # 全连接层处理展平后的特征图
         visual_features = self.visual_fc(visual_input_flattened)
-        #visual_features = visual_features.unsqueeze(1)
+        # visual_features = visual_features.unsqueeze(1)
         # 听觉特征提取
         audio_features = F.relu(self.audio_conv1(audio_input))
         audio_features = F.relu(self.audio_conv2(audio_features))
@@ -240,27 +242,33 @@ class ComplexMultiModalNN(nn.Module):
         # 展平音频特征，确保批次大小为1在最前面
         audio_features = audio_features.permute(0, 2, 1).contiguous().view(batch_size, -1)
         audio_features = self.audio_fc(audio_features)
-        #audio_features = audio_features.unsqueeze(1)
+        # audio_features = audio_features.unsqueeze(1)
         combined_features = torch.cat((visual_features, audio_features), dim=1)
         if self.memory is None:
-            memory,attention_cell,attention_hidden = load_model_memory()
-            self.memory=memory
-        # 应用动态自注意力机制
-        combined_features = self.conditional_attention(combined_features, combined_features, combined_features, None, attention_hidden)
-        current_batch_size = combined_features.size(0)
+            self.memory, self.attention = load_model_memory(self.memory, self.attention)
 
-        combined_input = torch.cat((combined_features.view(1, 1280), memory[0]), dim=1)
+        current_batch_size = combined_features.size(0)
+        # 应用动态自注意力机制
+        combined_features = self.conditional_attention(combined_features, combined_features, combined_features, None,
+                                                       self.attention[1].repeat(current_batch_size, 1))
+        combined_input=combined_features.view(current_batch_size, 1280)
+
+        combined_input = torch.cat((combined_input, self.memory[0].repeat(current_batch_size, 1)), dim=1)
+        print("combined_input",combined_input.size())
         # 计算动作概率
         outputs = [head(combined_input) for head in self.output_heads]
         combined_outputs = torch.cat(outputs, dim=0)
         # 计算 Q 值
-        q_values = self.q_value_head(combined_input)  # 使用 Q 值头计算 Q 值
+        q_values =0
+        if actions is not None:
+            combined_input=torch.cat((combined_input,actions.view(current_batch_size,actions.size(1)*actions.size(2))),dim=1)
+            q_values = self.q_value_head(combined_input)  # 使用 Q 值头计算 Q 值
 
         # 更新记忆状态
         if current_batch_size == 1:
             # 更新自注意力隐藏层
             input_to_lstm = combined_features[:, 0, :]
-            attention_hidden, attention_cell = self.acttention_lstm(input_to_lstm, (attention_hidden, attention_cell))
+            attention_hidden, attention_cell = self.acttention_lstm(input_to_lstm, attention)
             # 如果决定更新记忆，或者memory是None（第一次调用时）
             update_memory_decision = torch.sigmoid(self.update_memory_decision(combined_features))
             should_update_memory = torch.any(update_memory_decision > 0.5)
@@ -270,21 +278,19 @@ class ComplexMultiModalNN(nn.Module):
 
                 # 使用 torch.any() 来检查是否有任何元素大于 0.5
 
+        return combined_outputs, q_values, memory, attention
+    # 保存模型记忆状态
 
-        return combined_outputs, q_values
 
 def play_video(video_data):
-    video_output_reshaped = video_data.view(1, global_outputdim//3, 3)
+    video_data = torch.clamp(video_data, 0, 1)
+    video_output_reshaped = video_data.view(int(math.sqrt( global_outputdim//3)),int(math.sqrt( global_outputdim//3)), 3)
     # 将浮点数张量转换为 uint8 类型的 NumPy 数组
     # 假设值已经被缩放到 [0, 1] 的范围内
     video_output_8bit = (video_output_reshaped * 255).byte().cpu().numpy()
 
-    # 由于我们只有一个帧，不需要展开批次维度
-    frame_to_show = video_output_8bit[0]  # 获取第一个（也是唯一的）帧
-
-    frame_to_show = cv2.resize(frame_to_show, (100, 100))
     # 如果需要，将 RGB 转换为 BGR
-    frame_to_show_bgr = cv2.cvtColor(frame_to_show, cv2.COLOR_RGB2BGR)
+    frame_to_show_bgr = cv2.cvtColor(video_output_8bit, cv2.COLOR_RGB2BGR)
     cv2.imshow('GenerateVideo',frame_to_show_bgr)
 
     cv2.waitKey(10)
@@ -414,49 +420,47 @@ def get_audio():
         audio_data = torch.tensor(audio_data, dtype=torch.float)
     audio_data = audio_data.clone().detach().float()
     return audio_data
-# 加载模型记忆状态
-def load_model_memory():
-    if os.path.exists(memory_filename):
-        with open(memory_filename, 'r') as f:
-            memory_states = json.load(f)
-            # 假设隐藏状态和细胞状态是两个张量
-            cell_state = torch.tensor(memory_states['cell'])
-            hidden_state = torch.tensor(memory_states['hidden'])
-            epsilon = memory_states['epsilon']
-            epsilon_decay = memory_states['epsilon_decay']
-        memory=(cell_state,hidden_state )
-        print(f'Model memory loaded from {memory_filename}、{attention_memory_filename}')
-    else:
-        memory=(torch.zeros(1, input_value_size), torch.zeros(1, input_value_size))
+def load_model_memory(memory,attention):
+
+        if os.path.exists(memory_filename):
+            with open(memory_filename, 'r') as f:
+                memory_states = json.load(f)
+                # 假设隐藏状态和细胞状态是两个张量
+                cell_state = torch.tensor(memory_states['cell'])
+                hidden_state = torch.tensor(memory_states['hidden'])
+                epsilon = memory_states['epsilon']
+                epsilon_decay = memory_states['epsilon_decay']
+            memory=(cell_state,hidden_state )
+            print(f'Model memory loaded from {memory_filename}、{attention_memory_filename}')
+        else:
+            memory=(torch.zeros(1, input_value_size), torch.zeros(1, input_value_size))
 
 
-    if os.path.exists(attention_memory_filename):
-        with open(attention_memory_filename, 'r') as f:
-            attention_memory = json.load(f)
-            attention_hidden = torch.tensor(attention_memory['hidden']).to(attention_hidden.device)
-            attention_cell = torch.tensor(attention_memory['cell']).to(attention_cell.device)
-        print(f'Model memory loaded from {attention_memory_filename}')
-    else:
-        print(f'No model memory found at {memory_filename}、{attention_memory_filename}. Creating new memory.')
-        attention_cell=torch.zeros(1, input_value_size)
-        attention_hidden=torch.zeros(1, input_value_size)
-    return memory,attention_cell,attention_hidden
-
-# 保存模型记忆状态
-def save_model_memory():
+        if os.path.exists(attention_memory_filename):
+            with open(attention_memory_filename, 'r') as f:
+                attention_memory = json.load(f)
+                attention_cell = torch.tensor(attention_memory['cell'])
+                attention_hidden = torch.tensor(attention_memory['hidden'])
+            attention=(attention_cell,attention_hidden )
+            print(f'Model memory loaded from {attention_memory_filename}')
+        else:
+            print(f'No model memory found at {memory_filename}、{attention_memory_filename}. Creating new memory.')
+            attention = (torch.zeros(1, input_value_size), torch.zeros(1, input_value_size))
+        return memory,attention
+def save_model_memory(memory,attention):
     memory_states = {'cell': memory[0].tolist(),'hidden': memory[1].tolist(), 'epsilon': epsilon,'epsilon_decay': epsilon_decay}
     with open(memory_filename, 'w') as f:
         json.dump(memory_states, f)
-    attention_memory = {'hidden': attention_hidden.cpu().numpy(), 'cell': attention_cell.cpu().numpy()}
+
+    attention_memory = {'cell': attention[0].tolist(), 'hidden': attention[1].tolist()}
     with open(attention_memory_filename, 'w') as f:
         json.dump(attention_memory, f)
+
     print(f'Model memory saved to {memory_filename}，{attention_memory_filename}')
 
-# 初始化记忆状态
-memory=None
-# 初始化自注意力层的隐藏状态和细胞状态
-attention_hidden=None
-attention_cell =None
+
+
+
 input_video_size=512
 input_audio_size=128
 input_value_size=input_video_size+input_audio_size
@@ -506,7 +510,7 @@ for episode in range(num_episodes):
     total_reward = 0
     print("开始循环训练：", episode)
     # 执行动作并收集经验
-    total_timestip = 500
+    total_timestip = 10
     buffer_count = 0
     done=False
     for t in range(total_timestip):  # 假设每个episode有1000个时间步
@@ -517,7 +521,7 @@ for episode in range(num_episodes):
         with torch.no_grad():
             video_tensor = get_Video()
             audio_tensor = get_audio()
-            action, _ = model(video_tensor, audio_tensor)
+            action, _ ,memory,attention= model(video_tensor, audio_tensor)
 
         # 执行动作
         result = env.step(action)
@@ -543,28 +547,39 @@ for episode in range(num_episodes):
     # 训练模型
     print("实施训练")
     model.train()
-    for _ in range(buffer_count):  # 每个episode训练buffer_count次
+    weight_model = WeightLearningModel(global_outputdim, 1)
+    # 定义损失函数和优化器
+    criterion = nn.MSELoss()  # 均方误差损失
+    optimizer = optim.Adam(weight_model.parameters(), lr=0.001)
 
+    for epoch in range(buffer_count):  # 每个episode训练buffer_count次
+        # 假设我们的抽样批次大小为4
+        batch_size = 4
         states, actions, rewards, next_states, audio_states, next_audio_states, dones = replay_buffer.sample(
-            batch_size=4)
-        # 确保 dones 是一个一维的布尔张量
+            batch_size)
+        # 假设我们有以下张量：
+        # rewards: (batch_size,) 形状的张量，包含每个样本的立即奖励
+        # max_next_q_values: (batch_size,) 形状的张量，包含每个样本下一个状态的最大预期Q值
+        # gamma: 折扣因子，一个介于0和1之间的值
 
-        # 计算目标 Q 值
-        # 假设 model 的第一个输出是包含Q值的多头输出，我们需要选择对应的输出头
-        q_values_next = model(next_states, next_audio_states, memory)[2]  # 获取下一个状态的Q值
+        # 示例下一个状态的最大预期Q值
+        q_values_next = model(next_states, next_audio_states, memory,attention,actions)[1]  # 获取下一个状
         max_q_values_next = torch.max(q_values_next, dim=1)[0]  # 选择每个样本的最大Q值
-        # print("dones", dones.size())
-        rewards_expanded = rewards.unsqueeze(1).repeat(1, max_q_values_next.size(1))
-        dones_expanded = dones.unsqueeze(1).repeat(1, max_q_values_next.size(1))
-        target_q_values = rewards_expanded + (1 - dones_expanded) * 0.99 * max_q_values_next  # 计算目标Q值
+        # 折扣因子
+        gamma = 0.99
+        # 计算目标权重
+        # 目标权重是立即奖励加上折扣后的未来最大预期Q值
+        target_weights = rewards + gamma * max_q_values_next
+        # 现在 target_weights 包含了每个样本的目标权重
+        optimizer.zero_grad()  # 清空之前的梯度
+        outputs = weight_model(actions)  # 前向传播
+        loss = criterion(outputs, target_weights)  # 计算损失
+        loss.backward()  # 反向传播
+        optimizer.step()  # 更新权重
 
-        # 计算当前 Q 值
-        current_q_values = model(states, audio_states, memory)[2].squeeze(1)
-        loss = F.mse_loss(current_q_values, target_q_values)
+        if (epoch + 1) % 10 == 0:
+            print(f'Epoch [{epoch + 1}/100], Loss: {loss.item():.4f}')
 
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
 
     # 输出信息
     print("完成一次训练，已保存模型")
@@ -572,7 +587,7 @@ for episode in range(num_episodes):
     # 动态更新模型文件
     torch.save(model.state_dict(), model_path)
     # 训练结束后更新记忆状态
-    save_model_memory( memory_filename)
+    save_model_memory(memory,attention,memory_filename)
 # 在所有episode完成后，执行资源释放
 cap.release()  # 释放摄像头资源
 
