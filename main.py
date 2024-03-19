@@ -9,12 +9,10 @@ import gym
 from gym import spaces
 import numpy as np
 import pyaudio
-import speech_recognition as sr
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
-import librosa
 import platform
 import threading
 # 假设的解码器函数
@@ -130,37 +128,33 @@ class RobotEnv(gym.Env):
 
         # 选择动作
         if epsilon is not None and random.random() < epsilon:
-            # 探索：随机选择一个动作
-            action =torch.rand(10, 64) # 随机动作与outputdim要一致
-
+            print('探索：随机选择一个动作')
+            action =torch.rand(10, global_outputdim) # 随机动作与outputdim要一致
+            video_data = action[0].unsqueeze(0)
+            audio_data = action[1].unsqueeze(0)
         else:
             # 使用模型执行动作并获取动作概率和记忆状态
+            video_data=action[0]
+            audio_data = action[1]
+        #threading.Thread(target=play_video, args=(video_data)).start()  # 调用 play_video 函数进行播放
+        play_video(video_data)
+        thread = threading.Thread(target=play_audio, args=(audio_data)).start() # 调用 play_audio 函数进行播放
+        # play_audio(audio_data)
+        _, memory,_ = model(state, audio_state, self.memory)
+        # 更新 self.memory 以供下一次调用 step 方法时使用
+        self.memory = memory
+        next_state, next_audio_state = self.get_initial_state()
+        done = False  # 假设环境不会结束
+        info = {
+            'some_key': 'some_value',
+            'another_key': 'another_value',
+            # ...其他键值对...
+        }
+        # 额外信息
 
-            audio_data=action[0]
-
-            # 将音频波形转换为 NumPy 数组，并调用 play_audio 函数进行播放
-            thread = threading.Thread(target=play_audio, args=(audio_data))
-            thread.start()
-            # play_audio(audio_data)
-            _, memory,_ = model(state, audio_state, self.memory)
-            # 更新 self.memory 以供下一次调用 step 方法时使用
-            self.memory = memory
-
-
-            next_state, next_audio_state = self.get_initial_state()
-
-            done = False  # 假设环境不会结束
-            info = {
-                'some_key': 'some_value',
-                'another_key': 'another_value',
-                # ...其他键值对...
-            }
-            # 额外信息
-
-            # 使用识别出的奖励信号,如果没有提供,则使用默认值
-            reward = identify_reward(audio_state)
-
-            return next_state, next_audio_state, reward, done, info
+        # 使用识别出的奖励信号,如果没有提供,则使用默认值
+        reward = identify_reward(audio_state)
+        return next_state, next_audio_state, reward, done, info
 
 
 class ComplexMultiModalNN(nn.Module):
@@ -197,11 +191,11 @@ class ComplexMultiModalNN(nn.Module):
         # 自注意力层
         self.self_attention = SelfAttention(embed_size=128, heads=4)
         inputfeaturesnum=512
-        outputdim=64
+        outputdim=global_outputdim
         # 定义新的输出层，每个维度一个输出头
         self.output_heads = nn.ModuleList([
-            nn.Linear(inputfeaturesnum, outputdim),  # 语音数据，假设输出为1维
             nn.Linear(inputfeaturesnum, outputdim),  # 视频数据，假设输出为64维
+            nn.Linear(inputfeaturesnum, outputdim),  # 语音数据，假设输出为1维
             nn.Linear(inputfeaturesnum, outputdim),  # 双腿和脚移动数据
             nn.Linear(inputfeaturesnum, outputdim),  # 双手臂和手掌移动数据
             nn.Linear(inputfeaturesnum, outputdim),  # 腰部转动数据
@@ -267,7 +261,7 @@ class ComplexMultiModalNN(nn.Module):
             input_to_lstm = combined_features[:, 0, :]
             # 初始化记忆状态，如果它们是None或者需要更新
             if memory is None:
-                memory = load_model_memory(memory_states_filename)
+                memory = load_model_memory(memory_filename)
             # 更新记忆状态
             if current_batch_size == 1:
                 memory = self.memory_cell(input_to_lstm, memory)
@@ -289,41 +283,41 @@ class ComplexMultiModalNN(nn.Module):
     def get_memory():
         return memory
 
+def play_video(video_data):
+    video_output_reshaped = video_data.view(1, global_outputdim//3, 3)
+    # 将浮点数张量转换为 uint8 类型的 NumPy 数组
+    # 假设值已经被缩放到 [0, 1] 的范围内
+    video_output_8bit = (video_output_reshaped * 255).byte().cpu().numpy()
 
+    # 由于我们只有一个帧，不需要展开批次维度
+    frame_to_show = video_output_8bit[0]  # 获取第一个（也是唯一的）帧
+
+    frame_to_show = cv2.resize(frame_to_show, (100, 100))
+    # 如果需要，将 RGB 转换为 BGR
+    frame_to_show_bgr = cv2.cvtColor(frame_to_show, cv2.COLOR_RGB2BGR)
+    cv2.imshow('GenerateVideo',frame_to_show_bgr)
+
+    cv2.waitKey(10)
 def play_audio(audio_data):
-    # 假设 audio_data 是一个形状为 (1, 64) 的浮点数张量
-    # 首先确保 audio_data 的值在 [-1, 1] 范围内
-    audio_data = torch.clamp(audio_data, -1, 1)
 
-    # 将浮点数张量转换为 int16 类型
-    # 需要先调用 .cpu() 将张量移动到 CPU，然后使用 .float() 转换为浮点数
-    audio_data_int16 = (audio_data.float() * np.iinfo(np.int16).max).to(torch.int16)
-
-    # 现在 audio_data_int16 是一个形状为 (1, 64) 的 int16 类型的张量
-    # 我们需要将其转换为 NumPy 数组并去除批次维度 (1,) 以便使用 pyaudio 播放
-    audio_data_int16_np = audio_data_int16.squeeze(0).numpy()
+    audio_data = torch.clamp(audio_data, -1, 1)  # 首先确保 audio_data 的值在 [-1, 1] 范围内
+    audio_data_int16 = (audio_data.float() * np.iinfo(np.int16).max).to(torch.int16) # 将浮点数张量转换为 int16 类型
+    audio_data_int16_np = audio_data_int16.squeeze(0).numpy() # 我们需要将其转换为 NumPy 数组并去除批次维度 (1,) 以便使用 pyaudio 播放
 
     # 初始化 PyAudio 实例
     p = pyaudio.PyAudio()
-
     # 音频流参数
     stream_params = {
         'format': pyaudio.paInt16,
         'channels': 1,  # 单声道
         'rate': 44100  # 假设的采样率
     }
-
-    # 打开一个流（stream）以播放音频
-    stream = p.open(**stream_params, output=True)
-
-    # 播放音频
-    stream.write(audio_data_int16_np.tobytes())
-
+    stream = p.open(**stream_params, output=True)    # 打开一个流（stream）以播放音频
+    stream.write(audio_data_int16_np.tobytes())# 播放音频
     # 关闭 PyAudio 流
     stream.stop_stream()
     stream.close()
     p.terminate()
-
 def text_to_speech(text, language='Chinese'):
     # 初始化语音引擎
     engine = pyttsx3.init()
@@ -348,8 +342,6 @@ def compute_reward(self, next_state):
     reward = 1.0 / (distance_to_target + 1e-3)  # 加入一个小的常数以避免除以0
 
     return reward
-
-
 def check_done(self, next_state):
     # 检查任务是否完成
     # 这里我们简单地检查物体是否到达了目标位置
@@ -363,11 +355,9 @@ def check_done(self, next_state):
 
     # 如果没有达到阈值,任务未完成
     return False
-
-
 def identify_reward(Rewardaudio_data):
     # 未实现对动作的负反馈，比如遇到阻力
-    text = "well done"
+    text = ""
     # 解析文本以识别表扬
     if "well done" in text.lower() or "good job" in text.lower():
         return 1.0  # 正面奖励
@@ -375,7 +365,6 @@ def identify_reward(Rewardaudio_data):
         return -1.0  # 负面奖励
     else:
         return 0.0  # 无奖励
-
 
 def get_Video():
 
@@ -392,14 +381,14 @@ def get_Video():
 
     # 调整大小和归一化
     video_frame = cv2.resize(video_frame, (224, 224))
-    cv2.imshow('Frame', video_frame)
-    cv2.waitKey(10)
+    if showCamera:
+        cv2.imshow('Frame', video_frame)
+        cv2.waitKey(10)
     video_frame = np.transpose(video_frame, (2, 0, 1))
 
     # 确保视频数据的形状是 [1, channels, height, width]
     video_data = torch.tensor(video_frame).unsqueeze(0).float()
     return video_data
-
 
 def get_audio():
     # 尝试读取音频数据，添加异常处理
@@ -443,6 +432,8 @@ def load_model_memory(filename):
             # 假设隐藏状态和细胞状态是两个张量
             cell_state = torch.tensor(memory_states['cell'])
             hidden_state = torch.tensor(memory_states['hidden'])
+            epsilon = memory_states['epsilon']
+            epsilon_decay = memory_states['epsilon_decay']
         memory=(cell_state,hidden_state )
         print(f'Model memory loaded from {filename}')
     else:
@@ -454,24 +445,30 @@ def load_model_memory(filename):
 
 # 保存模型记忆状态
 def save_model_memory(memory, filename):
-    memory_states = {'cell': memory[0].tolist(),'hidden': memory[1].tolist()}
+    memory_states = {'cell': memory[0].tolist(),'hidden': memory[1].tolist(), 'epsilon': epsilon,'epsilon_decay': epsilon_decay}
     with open(filename, 'w') as f:
         json.dump(memory_states, f)
     print(f'Model memory saved to {filename}')
 
+showCamera=True
 # JSON文件名用于存储模型记忆状态
-memory_states_filename = 'model_memory.json'
+memory_filename = 'model_memory.json'
 model_path='robot_model.pt'
+global_outputdim=100*100*3
 # 初始化摄像头
-if platform.system() == "Darwin":# 判断操作系统是否为macOS
+if platform.system() == "Darwin":# 判断操作系out统是否为macOS
     cap = cv2.VideoCapture(0)
 else:
     webcamipport = 'http://192.168.1.116:8080/video'
     cap = cv2.VideoCapture(webcamipport)
+if showCamera:
+    cv2.namedWindow('Frame', cv2.WINDOW_NORMAL)
+    cv2.resizeWindow('Frame', 224, 224)
 
-cv2.namedWindow('Frame', cv2.WINDOW_NORMAL)
-cv2.resizeWindow('Frame', 224, 224)
+cv2.namedWindow('GenerateVideo', cv2.WINDOW_NORMAL)
+cv2.resizeWindow('GenerateVideo', 100, 100)
 cv2.waitKey(1000)
+
 # 初始化模型
 model = ComplexMultiModalNN()
 if os.path.exists(model_path):
@@ -488,7 +485,9 @@ env = RobotEnv()
 # 初始化记忆状态
 memory = None  # LSTM的隐藏状态和细胞状态
 # 在训练循环的开始处设置 epsilon
-epsilon = 0.1  # 例如，设置为0.1
+epsilon = 1.0  # 初始探索率
+epsilon_decay = 0.99  # 探索率衰减因子
+
 # 训练循环
 
 num_episodes = 20  # 设置一个较大的episode数,以便模型可以持续学习
@@ -502,6 +501,7 @@ for episode in range(num_episodes):
     # 执行动作并收集经验
     total_timestip = 500
     buffer_count = 0
+    done=False
     for t in range(total_timestip):  # 假设每个episode有1000个时间步
 
         print("时间步：", t)
@@ -522,9 +522,7 @@ for episode in range(num_episodes):
             audio_state = next_audio_state
             total_reward += reward
             buffer_count = buffer_count + 1
-        else:
-            # 处理返回值为None的情况
-            print("env.step returned None, which is not iterable.")
+
 
         # 如果是最后一个时间步，播放询问音频
         if t == total_timestip - 1:
@@ -532,8 +530,8 @@ for episode in range(num_episodes):
             # text_to_speech("我干得好吗？")
 
         # 如果episode结束，跳出循环
-        # if done:
-        # break
+        if done:
+            break
 
     # 训练模型
     print("实施训练")
@@ -567,7 +565,7 @@ for episode in range(num_episodes):
     # 动态更新模型文件
     torch.save(model.state_dict(), model_path)
     # 训练结束后更新记忆状态
-    save_model_memory(memory, memory_states_filename)
+    save_model_memory(memory, memory_filename)
 # 在所有episode完成后，执行资源释放
 cap.release()  # 释放摄像头资源
 
