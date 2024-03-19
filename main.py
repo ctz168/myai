@@ -57,40 +57,43 @@ class ReplayBuffer:
 
 
 class SelfAttention(nn.Module):
-    def __init__(self, embed_size, heads):
+    def __init__(self, embed_size, heads, condition_size):
         super(SelfAttention, self).__init__()
         self.embed_size = embed_size
         self.heads = heads
         self.head_dim = embed_size // heads
+        self.condition_size = condition_size
 
+        # 添加一个线性层来处理条件信息
+        self.condition_linear = nn.Linear(condition_size, embed_size)
+
+        # 原有的自注意力层的权重
         self.values = nn.Linear(self.head_dim, self.head_dim, bias=False)
         self.keys = nn.Linear(self.head_dim, self.head_dim, bias=False)
         self.queries = nn.Linear(self.head_dim, self.head_dim, bias=False)
         self.fc_out = nn.Linear(heads * self.head_dim, embed_size)
 
-    def forward(self, values, keys, queries, mask):
+    def forward(self, values, keys, queries, mask, condition):
+        # 处理条件信息
+        condition_features = self.condition_linear(condition)
+        combined_queries = torch.cat([queries, condition_features], dim=-1)
         N = queries.size(0)
-        # Split the embeddings into self.heads different pieces
+        # 原有的自注意力计算
         values = values.view(N, -1, self.heads, self.head_dim)
         keys = keys.view(N, -1, self.heads, self.head_dim)
-        queries = queries.view(N, -1, self.heads, self.head_dim)
+        combined_queries = combined_queries.view(N, -1, self.heads, self.head_dim)
 
-        # Scaled dot-product attention
-        attention = torch.matmul(queries, keys.transpose(-2, -1)) / (self.head_dim ** 0.5)
-
+        # 计算注意力权重
+        attention = torch.matmul(combined_queries, keys.transpose(-2, -1)) / (self.head_dim ** 0.5)
         if mask is not None:
             attention = attention.masked_fill(mask == 0, float("-1e20"))
 
-        # Apply softmax and scale
         attention = torch.softmax(attention, dim=-1)
-
-        # Apply attention
         out = torch.matmul(attention, values)
 
-        # Concatenate heads and pass through a final linear layer
+        # 将输出展平并经过一个最终的线性层
         out = out.view(N, -1, self.heads * self.head_dim)
         out = self.fc_out(out)
-
         return out
 
 
@@ -106,8 +109,6 @@ class RobotEnv(gym.Env):
             output=True,
             frames_per_buffer=1024
         )
-        # 初始化记忆状态
-        self.memory = None
         # 初始化环境状态
         self.state = None
         self.audio_state = None
@@ -140,9 +141,9 @@ class RobotEnv(gym.Env):
         play_video(video_data)
         thread = threading.Thread(target=play_audio, args=(audio_data)).start() # 调用 play_audio 函数进行播放
         # play_audio(audio_data)
-        _, memory,_ = model(state, audio_state, self.memory)
+        _, _ = model(state, audio_state)
         # 更新 self.memory 以供下一次调用 step 方法时使用
-        self.memory = memory
+
         next_state, next_audio_state = self.get_initial_state()
         done = False  # 假设环境不会结束
         info = {
@@ -161,12 +162,13 @@ class ComplexMultiModalNN(nn.Module):
     def __init__(self):
         # 初始化卷积层
         super(ComplexMultiModalNN, self).__init__()
-
+        self.memory=None
         # 初始化LSTM层
-        self.memory_cell =nn.LSTMCell(256, 256)
-
+        self.memory_cell =nn.LSTMCell(input_value_size, input_value_size)
+        # 假设我们使用一个LSTM来维护自注意力隐藏状态
+        self.acttention_lstm=nn.LSTMCell(input_value_size, input_value_size)
         # 初始化记忆更新决策层
-        self.update_memory_decision = nn.Linear(256, 1)
+        self.update_memory_decision = nn.Linear(input_value_size, 1)
 
         # 视觉处理部分
         # 添加视频卷积层
@@ -179,18 +181,19 @@ class ComplexMultiModalNN(nn.Module):
         num_features = conv_output_channels * output_height * output_width  # 计算实际的特征数量
 
         # 定义线性层，使用实际的特征数量
-        self.visual_fc = nn.Linear(num_features, 128)
+        self.visual_fc = nn.Linear(num_features, input_video_size)
         # 听觉处理部分
 
         # 添加音频卷积层
         self.audio_conv1 = nn.Conv1d(1, 32, kernel_size=3, stride=1, padding=1)
         self.audio_conv2 = nn.Conv1d(32, 64, kernel_size=3, stride=1, padding=1)
         # 全连接层
-        self.audio_fc = nn.Linear(64 * 1024, 128)  # 假设你需要将音频特征从1024维降到128维
+        self.audio_fc = nn.Linear(64 * 1024, input_audio_size)  # 假设你需要将音频特征从1024维降到128维
 
-        # 自注意力层
-        self.self_attention = SelfAttention(embed_size=128, heads=4)
-        inputfeaturesnum=512
+        # 初始化条件自注意力层
+        self.conditional_attention = SelfAttention(embed_size=input_value_size, heads=4, condition_size=input_value_size)
+
+        inputfeaturesnum=1920
         outputdim=global_outputdim
         # 定义新的输出层，每个维度一个输出头
         self.output_heads = nn.ModuleList([
@@ -207,7 +210,7 @@ class ComplexMultiModalNN(nn.Module):
         ])
         # 定义Q值输出层，输出维度与动作空间的维度相同
         self.q_value_head = nn.Linear(inputfeaturesnum, 10)  # 假设最终特征维度为512，动作空间维度为10
-    def forward(self, visual_input, audio_input, memory=None):
+    def forward(self, visual_input, audio_input):
 
         if torch.cuda.is_available():
             visual_input = visual_input.cuda()
@@ -229,59 +232,46 @@ class ComplexMultiModalNN(nn.Module):
         # print("visual_input_flattened:", visual_input_flattened)
         # 全连接层处理展平后的特征图
         visual_features = self.visual_fc(visual_input_flattened)
-
+        #visual_features = visual_features.unsqueeze(1)
         # 听觉特征提取
         audio_features = F.relu(self.audio_conv1(audio_input))
         audio_features = F.relu(self.audio_conv2(audio_features))
-        # print("Audio features shape before flattening:", audio_features.size())
         # 此处应包含展平操作，假设音频特征在展平前的最后一维为1024
         # 展平音频特征，确保批次大小为1在最前面
-        audio_features_flattened = audio_features.permute(0, 2, 1).contiguous().view(batch_size, -1)
-        # print("Audio features shape after flattening:",audio_features_flattened.size())  # 应该输出 torch.Size([1, 1024])   print("Audio features shape after flattening:", audio_features_flattened.size())
-        # assert audio_features_flattened.shape[1] == self.audio_fc.in_features
-        audio_features_processed = self.audio_fc(audio_features_flattened)
-        audio_features_processed = audio_features_processed.unsqueeze(1)
-        # 自注意力
-        visual_features = self.self_attention(visual_features, visual_features, visual_features, None)
-        audio_features_processed = self.self_attention(audio_features_processed, audio_features_processed,
-                                                       audio_features_processed, None)
-        # 合并视觉和听觉特征
-        combined_features = torch.cat((visual_features, audio_features_processed), dim=2)
-        # print("Combined features shape:", combined_features.size())
+        audio_features = audio_features.permute(0, 2, 1).contiguous().view(batch_size, -1)
+        audio_features = self.audio_fc(audio_features)
+        #audio_features = audio_features.unsqueeze(1)
+        combined_features = torch.cat((visual_features, audio_features), dim=1)
+        if self.memory is None:
+            memory,attention_cell,attention_hidden = load_model_memory()
+            self.memory=memory
+        # 应用动态自注意力机制
+        combined_features = self.conditional_attention(combined_features, combined_features, combined_features, None, attention_hidden)
         current_batch_size = combined_features.size(0)
 
-        # 决定是否更新记忆
-        update_memory_decision = torch.sigmoid(self.update_memory_decision(combined_features))
-        # 使用 torch.any() 来检查是否有任何元素大于 0.5
-        should_update_memory = torch.any(update_memory_decision > 0.5)
-
-        # 如果决定更新记忆，或者memory是None（第一次调用时）
-        if memory is None or should_update_memory:
-            # 确保输入特征的批次大小为1
-            input_to_lstm = combined_features[:, 0, :]
-            # 初始化记忆状态，如果它们是None或者需要更新
-            if memory is None:
-                memory = load_model_memory(memory_filename)
-            # 更新记忆状态
-            if current_batch_size == 1:
-                memory = self.memory_cell(input_to_lstm, memory)
-                # print("new memory size",memory[0].size())
-
-        # 将记忆状态扩展到与combined_features相同的批次大小
-        memory_expanded = memory[0]
-        # print("memory_expanded size",memory_expanded.size())
-        memory_expanded = memory_expanded.unsqueeze(0).repeat(current_batch_size, 1, 1)
-
-        combined_input = torch.cat((combined_features, memory_expanded), dim=2)
-
+        combined_input = torch.cat((combined_features.view(1, 1280), memory[0]), dim=1)
         # 计算动作概率
         outputs = [head(combined_input) for head in self.output_heads]
         combined_outputs = torch.cat(outputs, dim=0)
         # 计算 Q 值
         q_values = self.q_value_head(combined_input)  # 使用 Q 值头计算 Q 值
-        return combined_outputs, memory,q_values
-    def get_memory():
-        return memory
+
+        # 更新记忆状态
+        if current_batch_size == 1:
+            # 更新自注意力隐藏层
+            input_to_lstm = combined_features[:, 0, :]
+            attention_hidden, attention_cell = self.acttention_lstm(input_to_lstm, (attention_hidden, attention_cell))
+            # 如果决定更新记忆，或者memory是None（第一次调用时）
+            update_memory_decision = torch.sigmoid(self.update_memory_decision(combined_features))
+            should_update_memory = torch.any(update_memory_decision > 0.5)
+            if should_update_memory:
+                memory = self.memory_cell(input_to_lstm, memory)
+                # 决定是否更新记忆
+
+                # 使用 torch.any() 来检查是否有任何元素大于 0.5
+
+
+        return combined_outputs, q_values
 
 def play_video(video_data):
     video_output_reshaped = video_data.view(1, global_outputdim//3, 3)
@@ -425,9 +415,9 @@ def get_audio():
     audio_data = audio_data.clone().detach().float()
     return audio_data
 # 加载模型记忆状态
-def load_model_memory(filename):
-    if os.path.exists(filename):
-        with open(filename, 'r') as f:
+def load_model_memory():
+    if os.path.exists(memory_filename):
+        with open(memory_filename, 'r') as f:
             memory_states = json.load(f)
             # 假设隐藏状态和细胞状态是两个张量
             cell_state = torch.tensor(memory_states['cell'])
@@ -435,24 +425,48 @@ def load_model_memory(filename):
             epsilon = memory_states['epsilon']
             epsilon_decay = memory_states['epsilon_decay']
         memory=(cell_state,hidden_state )
-        print(f'Model memory loaded from {filename}')
+        print(f'Model memory loaded from {memory_filename}、{attention_memory_filename}')
     else:
-        print(f'No model memory found at {filename}. Creating new memory.')
-        # 初始化新的记忆状态并保存
-        memory=(torch.zeros(1, 256), torch.zeros(1, 256))
+        memory=(torch.zeros(1, input_value_size), torch.zeros(1, input_value_size))
 
-    return memory
+
+    if os.path.exists(attention_memory_filename):
+        with open(attention_memory_filename, 'r') as f:
+            attention_memory = json.load(f)
+            attention_hidden = torch.tensor(attention_memory['hidden']).to(attention_hidden.device)
+            attention_cell = torch.tensor(attention_memory['cell']).to(attention_cell.device)
+        print(f'Model memory loaded from {attention_memory_filename}')
+    else:
+        print(f'No model memory found at {memory_filename}、{attention_memory_filename}. Creating new memory.')
+        attention_cell=torch.zeros(1, input_value_size)
+        attention_hidden=torch.zeros(1, input_value_size)
+    return memory,attention_cell,attention_hidden
 
 # 保存模型记忆状态
-def save_model_memory(memory, filename):
+def save_model_memory():
     memory_states = {'cell': memory[0].tolist(),'hidden': memory[1].tolist(), 'epsilon': epsilon,'epsilon_decay': epsilon_decay}
-    with open(filename, 'w') as f:
+    with open(memory_filename, 'w') as f:
         json.dump(memory_states, f)
-    print(f'Model memory saved to {filename}')
+    attention_memory = {'hidden': attention_hidden.cpu().numpy(), 'cell': attention_cell.cpu().numpy()}
+    with open(attention_memory_filename, 'w') as f:
+        json.dump(attention_memory, f)
+    print(f'Model memory saved to {memory_filename}，{attention_memory_filename}')
 
+# 初始化记忆状态
+memory=None
+# 初始化自注意力层的隐藏状态和细胞状态
+attention_hidden=None
+attention_cell =None
+input_video_size=512
+input_audio_size=128
+input_value_size=input_video_size+input_audio_size
+# 在训练循环的开始处设置 epsilon
+epsilon = 1.0  # 初始探索率
+epsilon_decay = 0.99  # 探索率衰减因子
 showCamera=True
 # JSON文件名用于存储模型记忆状态
 memory_filename = 'model_memory.json'
+attention_memory_filename = 'model_memory.json'
 model_path='robot_model.pt'
 global_outputdim=100*100*3
 # 初始化摄像头
@@ -482,14 +496,7 @@ optimizer = optim.Adam(model.parameters(), lr=0.001)
 # 初始化环境
 env = RobotEnv()
 
-# 初始化记忆状态
-memory = None  # LSTM的隐藏状态和细胞状态
-# 在训练循环的开始处设置 epsilon
-epsilon = 1.0  # 初始探索率
-epsilon_decay = 0.99  # 探索率衰减因子
-
 # 训练循环
-
 num_episodes = 20  # 设置一个较大的episode数,以便模型可以持续学习
 for episode in range(num_episodes):
     # 重置环境和记忆
@@ -510,7 +517,7 @@ for episode in range(num_episodes):
         with torch.no_grad():
             video_tensor = get_Video()
             audio_tensor = get_audio()
-            action, memory,_ = model(video_tensor, audio_tensor, memory)
+            action, _ = model(video_tensor, audio_tensor)
 
         # 执行动作
         result = env.step(action)
@@ -565,7 +572,7 @@ for episode in range(num_episodes):
     # 动态更新模型文件
     torch.save(model.state_dict(), model_path)
     # 训练结束后更新记忆状态
-    save_model_memory(memory, memory_filename)
+    save_model_memory( memory_filename)
 # 在所有episode完成后，执行资源释放
 cap.release()  # 释放摄像头资源
 
