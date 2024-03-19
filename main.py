@@ -501,7 +501,7 @@ optimizer = optim.Adam(model.parameters(), lr=0.001)
 env = RobotEnv()
 
 # 训练循环
-num_episodes = 20  # 设置一个较大的episode数,以便模型可以持续学习
+num_episodes = 50  # 设置一个较大的episode数,以便模型可以持续学习
 for episode in range(num_episodes):
     # 重置环境和记忆
     replay_buffer = ReplayBuffer(capacity=10000)
@@ -510,7 +510,7 @@ for episode in range(num_episodes):
     total_reward = 0
     print("开始循环训练：", episode)
     # 执行动作并收集经验
-    total_timestip = 10
+    total_timestip = 500
     buffer_count = 0
     done=False
     for t in range(total_timestip):  # 假设每个episode有1000个时间步
@@ -587,7 +587,7 @@ for episode in range(num_episodes):
     # 动态更新模型文件
     torch.save(model.state_dict(), model_path)
     # 训练结束后更新记忆状态
-    save_model_memory(memory,attention,memory_filename)
+    save_model_memory(memory,attention)
 # 在所有episode完成后，执行资源释放
 cap.release()  # 释放摄像头资源
 
