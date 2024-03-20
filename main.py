@@ -35,10 +35,10 @@ class ReplayBuffer:
         self.buffer = []
         self.capacity = capacity
 
-    def push(self, state, action, reward, next_state, audio_state, next_audio_state, done):
+    def push(self, state, action, reward, next_state, audio_state, next_audio_state, done,memory,attention):
         if len(self.buffer) >= self.capacity:
             self.buffer.pop(0)
-        self.buffer.append((state, action, reward, next_state, audio_state, next_audio_state, done))
+        self.buffer.append((state, action, reward, next_state, audio_state, next_audio_state, done,memory,attention))
 
     def sample(self, batch_size):
         experiences = random.sample(self.buffer, batch_size)
@@ -49,10 +49,10 @@ class ReplayBuffer:
         audio_states = torch.cat([exp[4] for exp in experiences], dim=0)
         next_audio_states = torch.cat([exp[5] for exp in experiences], dim=0)
         dones = torch.tensor([int(exp[6]) for exp in experiences])
-
-
+        memorys=[exp[7] for exp in experiences]
+        attentions=[exp[8] for exp in experiences]
         # states, actions, rewards, next_states, dones = zip(*experiences)
-        return states, actions, rewards, next_states, audio_states, next_audio_states, dones
+        return states, actions, rewards, next_states, audio_states, next_audio_states, dones,memorys,attentions
 
     def __len__(self):
         return len(self.buffer)
@@ -156,7 +156,7 @@ class RobotEnv(gym.Env):
 
         # 使用识别出的奖励信号,如果没有提供,则使用默认值
         reward = identify_reward(audio_state)
-        return next_state, next_audio_state, reward, done, info
+        return next_state, next_audio_state, reward, done, info,memory,attention
 
 
 class ComplexMultiModalNN(nn.Module):
@@ -460,8 +460,9 @@ def save_model_memory(memory,attention):
     print(f'Model memory saved to {memory_filename}，{attention_memory_filename}')
 
 
-
-total_timestip = 500
+# 假设我们的抽样批次大小为32
+sample_batch_size = 32
+total_timestip =500
 input_video_size=512
 input_audio_size=128
 input_value_size=input_video_size+input_audio_size
@@ -529,9 +530,9 @@ for episode in range(num_episodes):
         # 执行动作
         result = env.step(action)
         if result is not None:
-            next_state, next_audio_state, reward, done, info = result
+            next_state, next_audio_state, reward, done, info,memory,attention = result
 
-            replay_buffer.push(state, action, reward, next_state, audio_state, next_audio_state, done)
+            replay_buffer.push(state, action, reward, next_state, audio_state, next_audio_state, done,memory,attention)
             state = next_state
             audio_state = next_audio_state
             total_reward += reward
@@ -556,28 +557,24 @@ for episode in range(num_episodes):
     optimizer = optim.Adam(weight_model.parameters(), lr=0.001)
 
     for epoch in range(buffer_count):  # 每个episode训练buffer_count次
-        # 假设我们的抽样批次大小为4
-        batch_size = 4
-        states, actions, rewards, next_states, audio_states, next_audio_states, dones = replay_buffer.sample(
-            batch_size)
+
+        states, actions, rewards, next_states, audio_states, next_audio_states, dones,memorys,attentions = replay_buffer.sample(
+            sample_batch_size)
         # 假设我们有以下张量：
         # rewards: (batch_size,) 形状的张量，包含每个样本的立即奖励
         # max_next_q_values: (batch_size,) 形状的张量，包含每个样本下一个状态的最大预期Q值
         # gamma: 折扣因子，一个介于0和1之间的值
-
-        # 示例下一个状态的最大预期Q值
-        q_values_next = model(next_states, next_audio_states, memory,attention,actions)[1]  # 获取下一个状
-        max_q_values_next = torch.max(q_values_next, dim=1)[0]  # 选择每个样本的最大Q值
+        q_values_cur = model(states, audio_states, memorys,attentions,actions)[1]
+        q_values_next = model(next_states, next_audio_states, memorys,attentions,actions)[1]  # 获取下一个状
         # 折扣因子
         gamma = 0.99
         # 计算目标权重
         # 目标权重是立即奖励加上折扣后的未来最大预期Q值
-        target_weights = rewards + gamma * max_q_values_next
+        target_weights = rewards.unsqueeze(1).repeat(1,q_values_next.size(1)) + (1.0 - dones.unsqueeze(1).repeat(1,q_values_next.size(1)))*gamma *q_values_next
         # 现在 target_weights 包含了每个样本的目标权重
         optimizer.zero_grad()  # 清空之前的梯度
         outputs = weight_model(actions)  # 前向传播
-        target_weights= target_weights.unsqueeze(1).unsqueeze(1)
-        loss = criterion(outputs, target_weights.repeat(1, 10, 1))  # 计算损失
+        loss = criterion(outputs, target_weights.unsqueeze(2))  # 计算损失
         loss.backward()  # 反向传播
         optimizer.step()  # 更新权重
 
@@ -586,12 +583,12 @@ for episode in range(num_episodes):
 
 
     # 输出信息
-    print("完成一次训练，已保存模型")
+    print("完成一次训练")
 
     # 动态更新模型文件
-    torch.save(model.state_dict(), model_path)
-    # 训练结束后更新记忆状态
-    save_model_memory(memory,attention)
+torch.save(model.state_dict(), model_path)
+# 训练结束后更新记忆状态
+save_model_memory(memory,attention)
 # 在所有episode完成后，执行资源释放
 cap.release()  # 释放摄像头资源
 
