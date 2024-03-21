@@ -49,8 +49,8 @@ class ReplayBuffer:
         audio_states = torch.cat([exp[4] for exp in experiences], dim=0)
         next_audio_states = torch.cat([exp[5] for exp in experiences], dim=0)
         dones = torch.tensor([int(exp[6]) for exp in experiences])
-        memorys=[exp[7] for exp in experiences]
-        attentions=[exp[8] for exp in experiences]
+        memorys=torch.cat([exp[7][0] for exp in experiences], dim=0)
+        attentions=torch.cat([exp[8][0] for exp in experiences],dim=0)
         # states, actions, rewards, next_states, dones = zip(*experiences)
         return states, actions, rewards, next_states, audio_states, next_audio_states, dones,memorys,attentions
 
@@ -118,10 +118,10 @@ class RobotEnv(gym.Env):
 
     def reset(self):
         # 重置环境状态
-        self.state, self.audio_state = self.get_initial_state()
+        self.state, self.audio_state = self.get_state()
         return self.state, self.audio_state
 
-    def get_initial_state(self):
+    def get_state(self):
         return get_Video(), get_audio()
 
     def step(self, action):
@@ -145,7 +145,7 @@ class RobotEnv(gym.Env):
 
         # 更新 self.memory 以供下一次调用 step 方法时使用
 
-        next_state, next_audio_state = self.get_initial_state()
+        next_state, next_audio_state = self.get_state()
         done = False  # 假设环境不会结束
         info = {
             'some_key': 'some_value',
@@ -156,7 +156,7 @@ class RobotEnv(gym.Env):
 
         # 使用识别出的奖励信号,如果没有提供,则使用默认值
         reward = identify_reward(audio_state)
-        return next_state, next_audio_state, reward, done, info,memory,attention
+        return next_state, next_audio_state, reward, done, info
 
 
 class ComplexMultiModalNN(nn.Module):
@@ -246,14 +246,25 @@ class ComplexMultiModalNN(nn.Module):
         combined_features = torch.cat((visual_features, audio_features), dim=1)
         if self.memory is None:
             self.memory, self.attention = load_model_memory(self.memory, self.attention)
-
+        if memory is None:
+            memory=self.memory
+            attention=self.attention
         current_batch_size = combined_features.size(0)
         # 应用动态自注意力机制
-        combined_features = self.conditional_attention(combined_features, combined_features, combined_features, None,
-                                                       self.attention[1].repeat(current_batch_size, 1))
-        combined_input=combined_features.view(current_batch_size, 1280)
+        if current_batch_size==1:
+            combined_features = self.conditional_attention(combined_features, combined_features, combined_features, None,
+                                                           attention[1].repeat(1, 1))
+            combined_input=combined_features.view(current_batch_size, 1280)
 
-        combined_input = torch.cat((combined_input, self.memory[0].repeat(current_batch_size, 1)), dim=1)
+            combined_input = torch.cat((combined_input, memory[0].repeat(1, 1)), dim=1)
+        else:
+            combined_features = self.conditional_attention(combined_features, combined_features, combined_features,
+                                                           None,
+                                                           attention)
+            combined_input = combined_features.view(current_batch_size, 1280)
+
+            combined_input = torch.cat((combined_input, memory), dim=1)
+
         # print("combined_input",combined_input.size())
         # 计算动作概率
         outputs = [head(combined_input) for head in self.output_heads]
@@ -268,18 +279,17 @@ class ComplexMultiModalNN(nn.Module):
         if current_batch_size == 1:
             # 更新自注意力隐藏层
             input_to_lstm = combined_features[:, 0, :]
-            attention_hidden, attention_cell = self.acttention_lstm(input_to_lstm, attention)
+            self.attention = self.acttention_lstm(input_to_lstm, attention)
             # 如果决定更新记忆，或者memory是None（第一次调用时）
             update_memory_decision = torch.sigmoid(self.update_memory_decision(combined_features))
             should_update_memory = torch.any(update_memory_decision > 0.5)
             if should_update_memory:
-                memory = self.memory_cell(input_to_lstm, memory)
+                self.memory = self.memory_cell(input_to_lstm, memory)
                 # 决定是否更新记忆
 
                 # 使用 torch.any() 来检查是否有任何元素大于 0.5
-        memory=self.memory
-        attention=self.attention
-        return combined_outputs, q_values, memory, attention
+
+        return combined_outputs, q_values
     # 保存模型记忆状态
 
 
@@ -309,7 +319,7 @@ def play_audio(audio_data):
         'channels': 1,  # 单声道
         'rate': 44100  # 假设的采样率
     }
-    stream = p.open(**stream_params, output=True)    # 打开一个流（stream）以播放音频
+    stream = p.open(**stream_params,output=True)    # 打开一个流（stream）以播放音频
     stream.write(audio_data_int16_np.tobytes())# 播放音频
     # 关闭 PyAudio 流
     stream.stop_stream()
@@ -389,7 +399,6 @@ def get_Video():
 
 def get_audio():
     # 尝试读取音频数据，添加异常处理
-
     audio_stream = pyaudio.PyAudio().open(
         format=pyaudio.paInt16,
         channels=1,
@@ -397,7 +406,21 @@ def get_audio():
         input=True,
         frames_per_buffer=512  # 保持原来的设置
     )
-    audio_data = audio_stream.read(512)  # 确保audio_stream是一个已经打开的音频流
+    try:
+        audio_data = audio_stream.read(512)  # 确保audio_stream是一个已经打开的音频流
+    except OSError as e:
+        if e.errno == -9981:
+            print("音频输入溢出，重置音频流...")  # 关闭当前音频流
+        # 创建新的音频流
+        audio_stream = pyaudio.PyAudio().open(
+            format=pyaudio.paInt16,
+            channels=1,
+            rate=44100, input=True,
+            frames_per_buffer=512)
+        # 保持原来的设置
+
+        audio_data = audio_stream.read(512)
+
     audio_stream.stop_stream()
     audio_stream.close()  # 终止PyAudio实例
     alen=len(audio_data)
@@ -443,9 +466,9 @@ def load_model_memory(memory,attention):
                 attention_cell = torch.tensor(attention_memory['cell'])
                 attention_hidden = torch.tensor(attention_memory['hidden'])
             attention=(attention_cell,attention_hidden )
-            print(f'Model memory loaded from {attention_memory_filename}')
+            print('Model memory loaded from {attention_memory_filename}')
         else:
-            print(f'No model memory found at {memory_filename}、{attention_memory_filename}. Creating new memory.')
+            print('No model memory found at {memory_filename}、{attention_memory_filename}. Creating new memory.')
             attention = (torch.zeros(1, input_value_size), torch.zeros(1, input_value_size))
         return memory,attention
 def save_model_memory(memory,attention):
@@ -457,64 +480,9 @@ def save_model_memory(memory,attention):
     with open(attention_memory_filename, 'w') as f:
         json.dump(attention_memory, f)
 
-    print(f'Model memory saved to {memory_filename}，{attention_memory_filename}')
+    print('Model memory saved to {memory_filename}，{attention_memory_filename}')
 
-
-# 假设我们的抽样批次大小为32
-sample_batch_size = 32
-total_timestip =500
-input_video_size=512
-input_audio_size=128
-input_value_size=input_video_size+input_audio_size
-# 在训练循环的开始处设置 epsilon
-epsilon = 1.0  # 初始探索率
-epsilon_decay = 0.99  # 探索率衰减因子
-memory=None
-attention=None
-showCamera=True
-# JSON文件名用于存储模型记忆状态
-memory_filename = 'model_memory.json'
-attention_memory_filename = 'attention_model_memory.json'
-model_path='robot_model.pt'
-global_outputdim=100*100*3
-# 初始化摄像头
-if platform.system() == "Darwin":# 判断操作系out统是否为macOS
-    cap = cv2.VideoCapture(0)
-else:
-    webcamipport = 'http://192.168.1.116:8080/video'
-    cap = cv2.VideoCapture(webcamipport)
-if showCamera:
-    cv2.namedWindow('Frame', cv2.WINDOW_NORMAL)
-    cv2.resizeWindow('Frame', 224, 224)
-
-cv2.namedWindow('GenerateVideo', cv2.WINDOW_NORMAL)
-cv2.resizeWindow('GenerateVideo', 100, 100)
-cv2.waitKey(1000)
-
-# 初始化模型
-model = ComplexMultiModalNN()
-if os.path.exists(model_path):
-    model.load_state_dict(torch.load(model_path), strict=False)
-    print(f'Loaded model state from {model_path}')
-else:
-    print(f'No model state found at {model_path}. Starting training from scratch.')
-# 初始化优化器
-optimizer = optim.Adam(model.parameters(), lr=0.001)
-
-# 初始化环境
-env = RobotEnv()
-
-# 训练循环
-num_episodes = 50  # 设置一个较大的episode数,以便模型可以持续学习
-for episode in range(num_episodes):
-    # 重置环境和记忆
-    replay_buffer = ReplayBuffer(capacity=10000)
-    state, audio_state = env.reset()
-
-    total_reward = 0
-    print("开始循环训练：", episode)
-    # 执行动作并收集经验
-
+def action_within_timestep(model,env,total_timestip,replay_buffer,state, audio_state,total_reward):
     buffer_count = 0
     done=False
     for t in range(total_timestip):  # 假设每个episode有1000个时间步
@@ -525,14 +493,14 @@ for episode in range(num_episodes):
         with torch.no_grad():
             video_tensor = get_Video()
             audio_tensor = get_audio()
-            action, _ ,memory,attention= model(video_tensor, audio_tensor)
+            action, _ = model(video_tensor, audio_tensor)
 
         # 执行动作
         result = env.step(action)
         if result is not None:
-            next_state, next_audio_state, reward, done, info,memory,attention = result
+            next_state, next_audio_state, reward, done, info = result
 
-            replay_buffer.push(state, action, reward, next_state, audio_state, next_audio_state, done,memory,attention)
+            replay_buffer.push(state, action, reward, next_state, audio_state, next_audio_state, done,model.memory,model.attention)
             state = next_state
             audio_state = next_audio_state
             total_reward += reward
@@ -547,7 +515,8 @@ for episode in range(num_episodes):
         # 如果episode结束，跳出循环
         if done:
             break
-
+    return  buffer_count
+def train_model(model,buffer_count,replay_buffer,total_train_num):
     # 训练模型
     print("实施训练")
     model.train()
@@ -580,15 +549,74 @@ for episode in range(num_episodes):
 
         if (epoch + 1) % 10 == 0:
             print(f'Epoch [{epoch + 1}/100], Loss: {loss.item():.4f}')
+    if total_train_num%10==0:
+        torch.save(model.state_dict(), model_path)
+    # 训练结束后更新记忆状态
+        save_model_memory(model.memory,model.attention)
 
+# 假设我们的抽样批次大小为32
+total_train_num=0
+sample_batch_size = 3
+total_timestip =10
+input_video_size=512
+input_audio_size=128
+input_value_size=input_video_size+input_audio_size
+# 在训练循环的开始处设置 epsilon
+epsilon = 1.0  # 初始探索率
+epsilon_decay = 0.99  # 探索率衰减因子
+showCamera=True
+# JSON文件名用于存储模型记忆状态
+memory_filename = 'model_memory.json'
+attention_memory_filename = 'attention_model_memory.json'
+model_path='robot_model.pt'
+global_outputdim=100*100*3
+# 初始化摄像头
+if platform.system() == "Darwin":# 判断操作系out统是否为macOS
+    cap = cv2.VideoCapture(0)
+else:
+    webcamipport = 'http://192.168.1.110:8080/video'
+    cap = cv2.VideoCapture(webcamipport)
+if showCamera:
+    cv2.namedWindow('Frame', cv2.WINDOW_NORMAL)
+    cv2.resizeWindow('Frame', 224, 224)
+
+cv2.namedWindow('GenerateVideo', cv2.WINDOW_NORMAL)
+cv2.resizeWindow('GenerateVideo', 100, 100)
+cv2.waitKey(1000)
+
+# 初始化模型
+model = ComplexMultiModalNN()
+if os.path.exists(model_path):
+    model.load_state_dict(torch.load(model_path), strict=False)
+    print('Loaded model state from {model_path}')
+else:
+    print('No model state found at {model_path}. Starting training from scratch.')
+# 初始化优化器
+optimizer = optim.Adam(model.parameters(), lr=0.001)
+
+# 初始化环境
+env = RobotEnv()
+
+# 训练循环
+num_episodes = 0  # 设置一个较大的episode数,以便模型可以持续学习
+
+while True:
+    num_episodes+=1
+    # 重置环境和记忆
+    replay_buffer = ReplayBuffer(capacity=1000000)
+    state, audio_state = env.reset()
+
+    total_reward = 0
+    print("开始循环训练：", num_episodes)
+    # 执行动作并收集经验
+
+    buffer_count= action_within_timestep(model,env,total_timestip,replay_buffer,state, audio_state,total_reward)
+    threading.Thread(target=train_model, args=(model,buffer_count,replay_buffer,total_train_num)).start()  # 调用 play_video 函数进行播放
 
     # 输出信息
     print("完成一次训练")
+    total_train_num=total_train_num+1
 
-    # 动态更新模型文件
-torch.save(model.state_dict(), model_path)
-# 训练结束后更新记忆状态
-save_model_memory(memory,attention)
 # 在所有episode完成后，执行资源释放
 cap.release()  # 释放摄像头资源
 
