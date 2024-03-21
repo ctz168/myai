@@ -114,7 +114,8 @@ class RobotEnv(gym.Env):
         self.state = None
         self.audio_state = None
         self.observation_space = gym.spaces.Box(low=0, high=255, shape=(224, 224, 3), dtype=float)  # 假设视频数据
-
+        self.epsilon =0
+        self.epsilon_decay=0
 
     def reset(self):
         # 重置环境状态
@@ -124,24 +125,23 @@ class RobotEnv(gym.Env):
     def get_state(self):
         return get_Video(), get_audio()
 
-    def step(self, action):
+    def step(self, action,t,total_timestip):
         # 执行动作并返回新状态、奖励、完成标志和额外信息
         # ... 执行动作的代码 ..
 
         # 选择动作
-        if epsilon is not None and random.random() < epsilon:
+        if self.epsilon is not None and random.random() < self.epsilon:
             print('探索：随机选择一个动作')
             action =torch.rand(10, global_outputdim) # 随机动作与outputdim要一致
-            video_data = action[0].unsqueeze(0)
-            audio_data = action[1].unsqueeze(0)
-        else:
-            # 使用模型执行动作并获取动作概率和记忆状态
-            video_data=action[0]
-            audio_data = action[1]
+
+        video_data = action[0].unsqueeze(0)
+        audio_data = action[1].unsqueeze(0)
+
+        self.epsilon=self.epsilon*self.epsilon_decay
         #threading.Thread(target=play_video, args=(video_data)).start()  # 调用 play_video 函数进行播放
         play_video(video_data)
-        thread = threading.Thread(target=play_audio, args=(audio_data)).start() # 调用 play_audio 函数进行播放
-        # play_audio(audio_data)
+        # thread = threading.Thread(target=play_audio, args=(audio_data)).start() # 调用 play_audio 函数进行播放
+        play_audio(audio_data)
 
         # 更新 self.memory 以供下一次调用 step 方法时使用
 
@@ -153,9 +153,14 @@ class RobotEnv(gym.Env):
             # ...其他键值对...
         }
         # 额外信息
-
+        # 如果是最后一个时间步，播放询问音频
+        if t == total_timestip - 1:
+            print("我干得好吗？此处已经注释")
+            # text_to_speech("我干得好吗？")
         # 使用识别出的奖励信号,如果没有提供,则使用默认值
-        reward = identify_reward(audio_state)
+            reward = identify_reward(audio_state)
+        else:
+            reward=0
         return next_state, next_audio_state, reward, done, info
 
 
@@ -171,6 +176,7 @@ class ComplexMultiModalNN(nn.Module):
         self.update_memory_decision = nn.Linear(input_value_size, 1)
         self.memory=None
         self.attention=None
+
         # 视觉处理部分
         # 添加视频卷积层
         self.conv1 = nn.Conv2d(3, 32, kernel_size=3, stride=1, padding=1)
@@ -245,7 +251,7 @@ class ComplexMultiModalNN(nn.Module):
         # audio_features = audio_features.unsqueeze(1)
         combined_features = torch.cat((visual_features, audio_features), dim=1)
         if self.memory is None:
-            self.memory, self.attention = load_model_memory(self.memory, self.attention)
+            self.memory, self.attention = load_model_memory(self.memory, self.attention,env)
         if memory is None:
             memory=self.memory
             attention=self.attention
@@ -364,7 +370,7 @@ def check_done(self, next_state):
     return False
 def identify_reward(Rewardaudio_data):
     # 未实现对动作的负反馈，比如遇到阻力
-    text = ""
+    text = "not good"
     # 解析文本以识别表扬
     if "well done" in text.lower() or "good job" in text.lower():
         return 1.0  # 正面奖励
@@ -444,7 +450,7 @@ def get_audio():
         audio_data = torch.tensor(audio_data, dtype=torch.float)
     audio_data = audio_data.clone().detach().float()
     return audio_data
-def load_model_memory(memory,attention):
+def load_model_memory(memory,attention,env):
 
         if os.path.exists(memory_filename):
             with open(memory_filename, 'r') as f:
@@ -452,8 +458,8 @@ def load_model_memory(memory,attention):
                 # 假设隐藏状态和细胞状态是两个张量
                 cell_state = torch.tensor(memory_states['cell'])
                 hidden_state = torch.tensor(memory_states['hidden'])
-                epsilon = memory_states['epsilon']
-                epsilon_decay = memory_states['epsilon_decay']
+                env.epsilon = memory_states['epsilon']
+                env.epsilon_decay = memory_states['epsilon_decay']
             memory=(cell_state,hidden_state )
             print(f'Model memory loaded from {memory_filename}、{attention_memory_filename}')
         else:
@@ -466,13 +472,13 @@ def load_model_memory(memory,attention):
                 attention_cell = torch.tensor(attention_memory['cell'])
                 attention_hidden = torch.tensor(attention_memory['hidden'])
             attention=(attention_cell,attention_hidden )
-            print('Model memory loaded from {attention_memory_filename}')
+            print(f'Model memory loaded from {attention_memory_filename}')
         else:
-            print('No model memory found at {memory_filename}、{attention_memory_filename}. Creating new memory.')
+            print(f'No model memory found at {memory_filename}、{attention_memory_filename}. Creating new memory.')
             attention = (torch.zeros(1, input_value_size), torch.zeros(1, input_value_size))
         return memory,attention
-def save_model_memory(memory,attention):
-    memory_states = {'cell': memory[0].tolist(),'hidden': memory[1].tolist(), 'epsilon': epsilon,'epsilon_decay': epsilon_decay}
+def save_model_memory(memory,attention,env):
+    memory_states = {'cell': memory[0].tolist(),'hidden': memory[1].tolist(), 'epsilon': env.epsilon,'epsilon_decay': env.epsilon_decay}
     with open(memory_filename, 'w') as f:
         json.dump(memory_states, f)
 
@@ -480,7 +486,7 @@ def save_model_memory(memory,attention):
     with open(attention_memory_filename, 'w') as f:
         json.dump(attention_memory, f)
 
-    print('Model memory saved to {memory_filename}，{attention_memory_filename}')
+    print(f'Model memory saved to {memory_filename}，{attention_memory_filename}')
 
 def action_within_timestep(model,env,total_timestip,replay_buffer,state, audio_state,total_reward):
     buffer_count = 0
@@ -496,21 +502,15 @@ def action_within_timestep(model,env,total_timestip,replay_buffer,state, audio_s
             action, _ = model(video_tensor, audio_tensor)
 
         # 执行动作
-        result = env.step(action)
+        result = env.step(action,t,total_timestip)
         if result is not None:
             next_state, next_audio_state, reward, done, info = result
 
             replay_buffer.push(state, action, reward, next_state, audio_state, next_audio_state, done,model.memory,model.attention)
             state = next_state
             audio_state = next_audio_state
-            total_reward += reward
             buffer_count = buffer_count + 1
 
-
-        # 如果是最后一个时间步，播放询问音频
-        if t == total_timestip - 1:
-            print("我干得好吗？此处已经注释")
-            # text_to_speech("我干得好吗？")
 
         # 如果episode结束，跳出循环
         if done:
@@ -552,7 +552,7 @@ def train_model(model,buffer_count,replay_buffer,total_train_num):
     if total_train_num%10==0:
         torch.save(model.state_dict(), model_path)
     # 训练结束后更新记忆状态
-        save_model_memory(model.memory,model.attention)
+        save_model_memory(model.memory,model.attention,env)
 
 # 假设我们的抽样批次大小为32
 total_train_num=0
@@ -562,7 +562,7 @@ input_video_size=512
 input_audio_size=128
 input_value_size=input_video_size+input_audio_size
 # 在训练循环的开始处设置 epsilon
-epsilon = 1.0  # 初始探索率
+epsilon = 0.001  # 初始探索率
 epsilon_decay = 0.99  # 探索率衰减因子
 showCamera=True
 # JSON文件名用于存储模型记忆状态
@@ -610,7 +610,7 @@ while True:
     # 执行动作并收集经验
 
     buffer_count= action_within_timestep(model,env,total_timestip,replay_buffer,state, audio_state,total_reward)
-    threading.Thread(target=train_model, args=(model,buffer_count,replay_buffer,total_train_num)).start()  # 调用 play_video 函数进行播放
+    threading.Thread(target=train_model, args=(model,buffer_count,replay_buffer,total_train_num)).start()
 
     # 输出信息
     print("完成一次训练")
