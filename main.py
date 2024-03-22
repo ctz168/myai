@@ -287,15 +287,15 @@ def play_audio(audio_data):
     stream.stop_stream()
     stream.close()
     p.terminate()
-def text_to_speech(text, language='Chinese'):
-    # 初始化语音引擎
-    engine = pyttsx3.init()
-    # 设置语言
-    engine.setProperty('voice', language)
-    # 说一句话
-    engine.say(text)
-    # 运行语音引擎
-    engine.runAndWait()
+# def text_to_speech(text, language='Chinese'):
+#     # 初始化语音引擎
+#     engine = pyttsx3.init()
+#     # 设置语言
+#     engine.setProperty('voice', language)
+#     # 说一句话
+#     engine.say(text)
+#     # 运行语音引擎
+#     engine.runAndWait()
 def compute_reward(self, next_state):
     # 假设我们有一个目标物体,我们想要机器人将其移动到特定位置
     # next_state包含了目标物体的当前位置
