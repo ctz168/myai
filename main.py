@@ -17,19 +17,6 @@ import torch.optim as optim
 import platform
 import threading
 
-# 定义权重学习模型
-class WeightLearningModel(nn.Module):
-    def __init__(self, input_dim, output_dim):
-        super(WeightLearningModel, self).__init__()
-        self.fc1 = nn.Linear(input_dim, 128)
-        self.fc2 = nn.Linear(128, 64)
-        self.fc3 = nn.Linear(64, output_dim)
-
-    def forward(self, action_results):
-        x = torch.relu(self.fc1(action_results))
-        x = torch.relu(self.fc2(x))
-        return self.fc3(x)
-
 class ReplayBuffer:
     def __init__(self, capacity):
         self.buffer = []
@@ -113,7 +100,6 @@ class RobotEnv(gym.Env):
         # 初始化环境状态
         self.state = None
         self.audio_state = None
-        self.observation_space = gym.spaces.Box(low=0, high=255, shape=(224, 224, 3), dtype=float)  # 假设视频数据
         self.epsilon =0
         self.epsilon_decay=0
 
@@ -176,27 +162,15 @@ class ComplexMultiModalNN(nn.Module):
         self.update_memory_decision = nn.Linear(input_value_size, 1)
         self.memory=None
         self.attention=None
-
+        self.optimizer=None
         # 视觉处理部分
         # 添加视频卷积层
-        self.conv1 = nn.Conv2d(3, 32, kernel_size=3, stride=1, padding=1)
-        self.conv2 = nn.Conv2d(32, 64, kernel_size=3, stride=1, padding=1)
-        # 初始化全连接层，根据实际输出形状计算输入特征数量
-        output_height = 56  # 实际卷积层输出的高度
-        output_width = 56  # 实际卷积层输出的宽度
-        conv_output_channels = 64  # 卷积层的输出通道数
-        num_features = conv_output_channels * output_height * output_width  # 计算实际的特征数量
-
-        # 定义线性层，使用实际的特征数量
+        conv_output_channels = 32  # 卷积层的输出通道数
+        self.conv1 = nn.Conv2d(3,conv_output_channels, kernel_size=3, stride=1, padding=1)
+        num_features = conv_output_channels * raw_video_height//2 * raw_video_width//2 # 计算实际的特征数量
         self.visual_fc = nn.Linear(num_features, input_video_size)
-        # 听觉处理部分
-
-        # 添加音频卷积层
-        self.audio_conv1 = nn.Conv1d(1, 32, kernel_size=3, stride=1, padding=1)
-        self.audio_conv2 = nn.Conv1d(32, 64, kernel_size=3, stride=1, padding=1)
-        # 全连接层
-        self.audio_fc = nn.Linear(64 * 1024, input_audio_size)  # 假设你需要将音频特征从1024维降到128维
-
+        self.audio_fc = nn.Linear(1024, input_audio_size)  # 假设你需要将音频特征从1024维降到128维
+        self.combine_fc=nn.Linear(input_value_size, input_value_size)
         # 初始化条件自注意力层
         self.conditional_attention = SelfAttention(embed_size=input_value_size, heads=4, condition_size=input_value_size)
 
@@ -206,17 +180,12 @@ class ComplexMultiModalNN(nn.Module):
         self.output_heads = nn.ModuleList([
             nn.Linear(inputfeaturesnum, outputdim),  # 视频数据，假设输出为64维
             nn.Linear(inputfeaturesnum, outputdim),  # 语音数据，假设输出为1维
-            nn.Linear(inputfeaturesnum, outputdim),  # 双腿和脚移动数据
-            nn.Linear(inputfeaturesnum, outputdim),  # 双手臂和手掌移动数据
-            nn.Linear(inputfeaturesnum, outputdim),  # 腰部转动数据
-            nn.Linear(inputfeaturesnum, outputdim),  # 头部转动数据
             nn.Linear(inputfeaturesnum, outputdim),  # 语音对应的文本数据
-            nn.Linear(inputfeaturesnum, outputdim),  # 面部表情数据
-            nn.Linear(inputfeaturesnum, outputdim),  # 接入互联网通过TCP的发包数据
-            nn.Linear(inputfeaturesnum, outputdim)   # Python代码数据
+            nn.Linear(inputfeaturesnum, outputdim),  # 双手臂和手掌移动数据
+             nn.Linear(inputfeaturesnum, outputdim)  # 双腿和脚移动数据
         ])
         # 定义Q值输出层，输出维度与动作空间的维度相同
-        self.q_value_head = nn.Linear(inputfeaturesnum+10*outputdim, 10)  # 假设最终特征维度为512，动作空间维度为10
+        self.q_value_head = nn.Linear(inputfeaturesnum+5*outputdim, 5)  # 假设最终特征维度为512，动作维度为7
 
     def forward(self, visual_input, audio_input, memory=None, attention=None,actions=None):
 
@@ -225,64 +194,51 @@ class ComplexMultiModalNN(nn.Module):
             audio_input = audio_input.cuda()
 
         # 视觉特征提取
-        # print(" visual_input shape:", visual_input.size())
-        visual_input = F.relu(self.conv1(visual_input))
+        visual_input =self.conv1(visual_input)
+        visual_input = F.relu(visual_input)
         visual_input = F.max_pool2d(visual_input, 2)
-        visual_input = F.relu(self.conv2(visual_input))
-        visual_input = F.max_pool2d(visual_input, 2)
-        # 在forward方法中，卷积层之后添加打印语句
-        # print("Convolutional visual_input shape:", visual_input.size())
-        # 计算卷积层输出的特征图的展平大小
+
         batch_size = visual_input.size(0)
-        # print("batch_size:", batch_size)
-        # 展平特征图
         visual_input_flattened = visual_input.view(batch_size, -1)  # 展平为 [batch_size, num_features]
-        # print("visual_input_flattened:", visual_input_flattened)
-        # 全连接层处理展平后的特征图
         visual_features = self.visual_fc(visual_input_flattened)
-        # visual_features = visual_features.unsqueeze(1)
+
         # 听觉特征提取
-        audio_features = F.relu(self.audio_conv1(audio_input))
-        audio_features = F.relu(self.audio_conv2(audio_features))
-        # 此处应包含展平操作，假设音频特征在展平前的最后一维为1024
-        # 展平音频特征，确保批次大小为1在最前面
-        audio_features = audio_features.permute(0, 2, 1).contiguous().view(batch_size, -1)
-        audio_features = self.audio_fc(audio_features)
-        # audio_features = audio_features.unsqueeze(1)
+        audio_features = F.relu(audio_input)
+        audio_features = self.audio_fc(audio_features.view(batch_size,-1))
+
         combined_features = torch.cat((visual_features, audio_features), dim=1)
+        combined_features=self.combine_fc(combined_features)
         if self.memory is None:
             self.memory, self.attention = load_model_memory(self.memory, self.attention,env)
         if memory is None:
             memory=self.memory
             attention=self.attention
-        current_batch_size = combined_features.size(0)
+
         # 应用动态自注意力机制
-        if current_batch_size==1:
+        if batch_size==1:
             combined_features = self.conditional_attention(combined_features, combined_features, combined_features, None,
                                                            attention[1].repeat(1, 1))
-            combined_input=combined_features.view(current_batch_size, 1280)
+            combined_input=combined_features.view(batch_size, 1280)
 
             combined_input = torch.cat((combined_input, memory[0].repeat(1, 1)), dim=1)
         else:
             combined_features = self.conditional_attention(combined_features, combined_features, combined_features,
                                                            None,
                                                            attention)
-            combined_input = combined_features.view(current_batch_size, 1280)
+            combined_input = combined_features.view(batch_size, 1280)
 
             combined_input = torch.cat((combined_input, memory), dim=1)
-
-        # print("combined_input",combined_input.size())
-        # 计算动作概率
+        combined_input=F.relu(combined_input)
         outputs = [head(combined_input) for head in self.output_heads]
         combined_outputs = torch.cat(outputs, dim=0)
         # 计算 Q 值
         q_values =0
         if actions is not None:
-            combined_input=torch.cat((combined_input,actions.view(current_batch_size,actions.size(1)*actions.size(2))),dim=1)
+            combined_input=torch.cat((combined_input,actions.view(batch_size,actions.size(1)*actions.size(2))),dim=1)
             q_values = self.q_value_head(combined_input)  # 使用 Q 值头计算 Q 值
 
         # 更新记忆状态
-        if current_batch_size == 1:
+        if batch_size == 1:
             # 更新自注意力隐藏层
             input_to_lstm = combined_features[:, 0, :]
             self.attention = self.acttention_lstm(input_to_lstm, attention)
@@ -393,9 +349,9 @@ def get_Video():
     video_frame = video_frame.astype(np.float32) / 255.0
 
     # 调整大小和归一化
-    video_frame = cv2.resize(video_frame, (224, 224))
+    video_frame = cv2.resize(video_frame, (raw_video_width, raw_video_height))
     if showCamera:
-        cv2.imshow('Frame', video_frame)
+        cv2.imshow('Frame', cv2.resize(video_frame, (raw_video_width, raw_video_height)))
         cv2.waitKey(10)
     video_frame = np.transpose(video_frame, (2, 0, 1))
 
@@ -439,15 +395,10 @@ def get_audio():
         # 如果读取的数据超过1024字节，截断或分帧处理
         # 这里我们选择截断数据
         audio_data = audio_data[:1024]
-    if isinstance(audio_data, torch.Tensor):
-        print("audio_data is a PyTorch tensor.")
-    else:
-        # 使用struct.unpack处理音频数据
-        audio_data = struct.unpack('b' * 1024, audio_data)
-        audio_data = np.array(audio_data) / 32768.0
-        # 将音频数据转换为适合卷积层的形状
-        audio_data = np.reshape(audio_data, (1, 1, -1))  # [1, 1, sample_rate]
-        audio_data = torch.tensor(audio_data, dtype=torch.float)
+    # 使用struct.unpack处理音频数据
+    audio_data = struct.unpack('b' * 1024, audio_data)
+    audio_data = np.array(audio_data) / 32768.0
+    audio_data = torch.tensor(audio_data, dtype=torch.float)
     audio_data = audio_data.clone().detach().float()
     return audio_data
 def load_model_memory(memory,attention,env):
@@ -520,12 +471,11 @@ def train_model(model,buffer_count,replay_buffer,total_train_num):
     # 训练模型
     print("实施训练")
     model.train()
-    weight_model = WeightLearningModel(global_outputdim, 1)
     # 定义损失函数和优化器
     criterion = nn.MSELoss()  # 均方误差损失
-    optimizer = optim.Adam(weight_model.parameters(), lr=0.001)
 
-    for epoch in range(buffer_count):  # 每个episode训练buffer_count次
+
+    for epoch in range(buffer_count//5):  # 每个episode训练buffer_count次
 
         states, actions, rewards, next_states, audio_states, next_audio_states, dones,memorys,attentions = replay_buffer.sample(
             sample_batch_size)
@@ -539,37 +489,39 @@ def train_model(model,buffer_count,replay_buffer,total_train_num):
         gamma = 0.99
         # 计算目标权重
         # 目标权重是立即奖励加上折扣后的未来最大预期Q值
-        target_weights = rewards.unsqueeze(1).repeat(1,q_values_next.size(1)) + (1.0 - dones.unsqueeze(1).repeat(1,q_values_next.size(1)))*gamma *q_values_next
+        target_q_values = rewards.unsqueeze(1).repeat(1,q_values_next.size(1)) + (1.0 - dones.unsqueeze(1).repeat(1,q_values_next.size(1)))*gamma *q_values_next
         # 现在 target_weights 包含了每个样本的目标权重
-        optimizer.zero_grad()  # 清空之前的梯度
-        outputs = weight_model(actions)  # 前向传播
-        loss = criterion(outputs, target_weights.unsqueeze(2))  # 计算损失
+        model.optimizer.zero_grad()  # 清空之前的梯度
+        loss = criterion(q_values_cur, target_q_values)  # 计算损失
         loss.backward()  # 反向传播
-        optimizer.step()  # 更新权重
+        model.optimizer.step()  # 更新权重
+        print(f'Epoch [{epoch + 1}/{buffer_count}], Loss: {loss.item():.4f}')
 
-        if (epoch + 1) % 10 == 0:
-            print(f'Epoch [{epoch + 1}/100], Loss: {loss.item():.4f}')
     if total_train_num%10==0:
         torch.save(model.state_dict(), model_path)
     # 训练结束后更新记忆状态
         save_model_memory(model.memory,model.attention,env)
 
 # 假设我们的抽样批次大小为32
-total_train_num=0
-sample_batch_size = 3
-total_timestip =10
+
+sample_batch_size = 32
+total_timestip =50
+
+raw_video_height=224
+raw_video_width=224
 input_video_size=512
 input_audio_size=128
 input_value_size=input_video_size+input_audio_size
-# 在训练循环的开始处设置 epsilon
+
+total_train_num=0
 epsilon = 0.001  # 初始探索率
 epsilon_decay = 0.99  # 探索率衰减因子
-showCamera=True
+showCamera=False
 # JSON文件名用于存储模型记忆状态
 memory_filename = 'model_memory.json'
 attention_memory_filename = 'attention_model_memory.json'
 model_path='robot_model.pt'
-global_outputdim=100*100*3
+global_outputdim=20*20*3
 # 初始化摄像头
 if platform.system() == "Darwin":# 判断操作系out统是否为macOS
     cap = cv2.VideoCapture(0)
@@ -578,28 +530,26 @@ else:
     cap = cv2.VideoCapture(webcamipport)
 if showCamera:
     cv2.namedWindow('Frame', cv2.WINDOW_NORMAL)
-    cv2.resizeWindow('Frame', 224, 224)
+    cv2.resizeWindow('Frame', raw_video_width, raw_video_height)
 
 cv2.namedWindow('GenerateVideo', cv2.WINDOW_NORMAL)
 cv2.resizeWindow('GenerateVideo', 100, 100)
-cv2.waitKey(1000)
+cv2.waitKey(100)
 
 # 初始化模型
 model = ComplexMultiModalNN()
+model.optimizer = optim.Adam(model.parameters(), lr=0.001)
 if os.path.exists(model_path):
     model.load_state_dict(torch.load(model_path), strict=False)
     print('Loaded model state from {model_path}')
 else:
     print('No model state found at {model_path}. Starting training from scratch.')
-# 初始化优化器
-optimizer = optim.Adam(model.parameters(), lr=0.001)
 
 # 初始化环境
 env = RobotEnv()
 
 # 训练循环
-num_episodes = 0  # 设置一个较大的episode数,以便模型可以持续学习
-
+num_episodes = 0
 while True:
     num_episodes+=1
     # 重置环境和记忆
@@ -610,8 +560,8 @@ while True:
     # 执行动作并收集经验
 
     buffer_count= action_within_timestep(model,env,total_timestip,replay_buffer,state, audio_state,total_reward)
-    threading.Thread(target=train_model, args=(model,buffer_count,replay_buffer,total_train_num)).start()
-
+    #threading.Thread(target=train_model, args=(model,buffer_count,replay_buffer,total_train_num)).start()
+    train_model(model,buffer_count,replay_buffer,total_train_num)
     # 输出信息
     print("完成一次训练")
     total_train_num=total_train_num+1
